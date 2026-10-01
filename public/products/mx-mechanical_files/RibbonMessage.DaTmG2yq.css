@@ -1,0 +1,1 @@
+.ribbon-text p{display:inline}.message-grid.svelte-flcpoh{--cols: 1;grid-auto-columns:calc((100% + var(--gutter)) / var(--cols) - var(--gutter))}.ribbon-default.svelte-flcpoh{background-color:var(--ribbon-bg);color:var(--ribbon-fg)}

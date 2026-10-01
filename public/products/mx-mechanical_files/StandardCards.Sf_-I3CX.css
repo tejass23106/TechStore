@@ -1,0 +1,1 @@
+.standard-card-grid.svelte-1k52ohh{--cols: 1.3}@media(min-width:600px){.standard-card-grid.svelte-1k52ohh{--cols: 3}.three-col-peek.svelte-1k52ohh .standard-card-grid:where(.svelte-1k52ohh){--cols: 3.2}}.standard-card-grid.svelte-1k52ohh{grid-auto-columns:calc((100% + var(--gutter)) / var(--cols) - var(--gutter))}
