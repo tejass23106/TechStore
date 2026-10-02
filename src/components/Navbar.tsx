@@ -1,4 +1,5 @@
 import { Link, NavLink } from "react-router-dom";
+
 import {
   ShoppingBag,
   Menu,
@@ -7,9 +8,11 @@ import {
   User,
   LogOut,
 } from "lucide-react";
+
 import { useState } from "react";
 
 import { useCart } from "../context/CartContext";
+
 import { useAuth } from "../context/AuthContext";
 
 const navigation = [
@@ -22,6 +25,7 @@ export default function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const { totalItems } = useCart();
+
   const { user, loading, logout } = useAuth();
 
   async function handleLogout() {
@@ -51,9 +55,10 @@ export default function Navbar() {
               key={item.path}
               to={item.path}
               className={({ isActive }) =>
-                `text-sm font-medium transition ${isActive
-                  ? "text-black"
-                  : "text-gray-500 hover:text-black"
+                `text-sm font-medium transition ${
+                  isActive
+                    ? "text-black"
+                    : "text-gray-500 hover:text-black"
                 }`
               }
             >
@@ -90,27 +95,43 @@ export default function Navbar() {
           {/* AUTH */}
           {loading ? (
             <div className="ml-2 h-10 w-24 animate-pulse rounded-full bg-gray-100" />
-          ) : user ?
-           (
+          ) : user ? (
             <div className="ml-2 flex items-center gap-2">
+              {/* ADMIN PANEL - ADMIN ONLY */}
+              {user.role === "ADMIN" && (
+                <Link
+                  to="/admin"
+                  className="rounded-full bg-black px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-gray-800"
+                >
+                  Admin Panel
+                </Link>
+              )}
+
+              {/* ACCOUNT */}
               <Link
-  to="/account"
-  className="rounded-full px-4 py-2.5 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
->
-  Account
-</Link>
+                to="/account"
+                className="rounded-full px-4 py-2.5 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
+              >
+                Account
+              </Link>
+
+              {/* ORDERS */}
               <Link
-  to="/orders"
-  className="rounded-full px-4 py-2.5 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
->
-  My Orders
-</Link>
-<Link
-  to="/wishlist"
-  className="rounded-full px-4 py-2.5 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
->
-  Wishlist
-</Link>
+                to="/orders"
+                className="rounded-full px-4 py-2.5 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
+              >
+                My Orders
+              </Link>
+
+              {/* WISHLIST */}
+              <Link
+                to="/wishlist"
+                className="rounded-full px-4 py-2.5 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
+              >
+                Wishlist
+              </Link>
+
+              {/* USER */}
               <div className="flex items-center gap-2 rounded-full bg-gray-100 px-4 py-2.5">
                 <User size={17} />
 
@@ -119,6 +140,7 @@ export default function Navbar() {
                 </span>
               </div>
 
+              {/* LOGOUT */}
               <button
                 onClick={handleLogout}
                 aria-label="Logout"
@@ -154,6 +176,7 @@ export default function Navbar() {
       {mobileOpen && (
         <div className="border-t border-gray-200 bg-white md:hidden">
           <nav className="mx-auto flex max-w-7xl flex-col px-5 py-5">
+            {/* MAIN NAVIGATION */}
             {navigation.map((item) => (
               <NavLink
                 key={item.path}
@@ -165,6 +188,7 @@ export default function Navbar() {
               </NavLink>
             ))}
 
+            {/* CART */}
             <Link
               to="/cart"
               onClick={() => setMobileOpen(false)}
@@ -174,31 +198,50 @@ export default function Navbar() {
               {totalItems > 0 && ` (${totalItems})`}
             </Link>
 
+            {/* AUTH */}
             {loading ? (
               <div className="mt-5 h-11 animate-pulse rounded-xl bg-gray-100" />
             ) : user ? (
               <>
-              <Link
-  to="/account"
-  onClick={() => setMobileOpen(false)}
-  className="border-b border-gray-100 py-4 text-sm font-medium"
->
-  Account
-</Link>
-              <Link
-  to="/orders"
-  onClick={() => setMobileOpen(false)}
-  className="border-b border-gray-100 py-4 text-sm font-medium"
->
-  My Orders
-</Link>
-<Link
-  to="/wishlist"
-  onClick={() => setMobileOpen(false)}
-  className="border-b border-gray-100 py-4 text-sm font-medium"
->
-  Wishlist
-</Link>
+                {/* ADMIN PANEL - ADMIN ONLY */}
+                {user.role === "ADMIN" && (
+                  <Link
+                    to="/admin"
+                    onClick={() => setMobileOpen(false)}
+                    className="border-b border-gray-100 py-4 text-sm font-semibold"
+                  >
+                    Admin Panel
+                  </Link>
+                )}
+
+                {/* ACCOUNT */}
+                <Link
+                  to="/account"
+                  onClick={() => setMobileOpen(false)}
+                  className="border-b border-gray-100 py-4 text-sm font-medium"
+                >
+                  Account
+                </Link>
+
+                {/* ORDERS */}
+                <Link
+                  to="/orders"
+                  onClick={() => setMobileOpen(false)}
+                  className="border-b border-gray-100 py-4 text-sm font-medium"
+                >
+                  My Orders
+                </Link>
+
+                {/* WISHLIST */}
+                <Link
+                  to="/wishlist"
+                  onClick={() => setMobileOpen(false)}
+                  className="border-b border-gray-100 py-4 text-sm font-medium"
+                >
+                  Wishlist
+                </Link>
+
+                {/* USER INFO */}
                 <div className="mt-5 flex items-center gap-3 rounded-xl bg-gray-100 px-4 py-3">
                   <User size={18} />
 
@@ -213,6 +256,7 @@ export default function Navbar() {
                   </div>
                 </div>
 
+                {/* LOGOUT */}
                 <button
                   onClick={handleLogout}
                   className="mt-3 flex items-center justify-center gap-2 rounded-xl border border-gray-200 py-3 text-sm font-semibold"
@@ -236,4 +280,5 @@ export default function Navbar() {
     </header>
   );
 }
+
 
