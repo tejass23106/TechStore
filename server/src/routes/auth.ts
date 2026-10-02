@@ -40,7 +40,7 @@ sessionId: string
 res.cookie("techstore_session", sessionId, {
 httpOnly: true,
 secure: process.env.NODE_ENV === "production",
-sameSite: "lax",
+sameSite: "none",
 maxAge:
 SESSION_DURATION_DAYS *
 24 *
