@@ -44,13 +44,17 @@ const FINAL_RESPONSE_PROMPT =
   "Answer concisely in Markdown using ₹ for prices. " +
   "Do not call tools.";
 
-function isGeminiQuotaError(error: unknown) {
-  const text = [
+function getErrorText(error: unknown) {
+  return [
     error instanceof Error ? error.message : "",
     String(error),
   ]
     .join(" ")
     .toLowerCase();
+}
+
+function isGeminiQuotaError(error: unknown) {
+  const text = getErrorText(error);
 
   return (
     text.includes("429") ||
@@ -61,12 +65,7 @@ function isGeminiQuotaError(error: unknown) {
 }
 
 function isGeminiUnavailableError(error: unknown) {
-  const text = [
-    error instanceof Error ? error.message : "",
-    String(error),
-  ]
-    .join(" ")
-    .toLowerCase();
+  const text = getErrorText(error);
 
   return (
     text.includes("503") ||
@@ -92,23 +91,71 @@ function createUnavailableError() {
   );
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Gemini can temporarily return 503/429.
+ * Retry only transient Gemini failures.
+ */
+async function generateWithRetry<T>(
+  request: () => Promise<T>,
+  label: string,
+  maxAttempts = 3
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await request();
+    } catch (error) {
+      lastError = error;
+
+      const isTransient =
+        isGeminiUnavailableError(error) ||
+        isGeminiQuotaError(error);
+
+      if (!isTransient || attempt === maxAttempts) {
+        throw error;
+      }
+
+      const delay = 1000 * 2 ** (attempt - 1);
+
+      console.warn(
+        `${label} failed with a transient Gemini error. ` +
+          `Retrying in ${delay}ms... ` +
+          `(attempt ${attempt}/${maxAttempts})`
+      );
+
+      await sleep(delay);
+    }
+  }
+
+  throw lastError;
+}
+
 const tools: Tool[] = [
   {
     functionDeclarations: [
       {
         name: "searchProducts",
         description:
-          "Search active TechStore products by name, category, price, or rating. Use for product questions and recommendations.",
+          "Search active TechStore products by name, category, price, or rating. " +
+          "Use this for all product questions and recommendations. " +
+          "If the user asks for products from a category such as laptops, phones, gaming, audio, accessories, or storage, use the category field.",
         parameters: {
           type: Type.OBJECT,
           properties: {
             query: {
               type: Type.STRING,
-              description: "Product keyword or name.",
+              description:
+                "Optional product keyword or name. Do not use a category name here when category can be used.",
             },
             category: {
               type: Type.STRING,
-              description: "Product category.",
+              description:
+                "Optional product category such as Laptops, Phones, Gaming, Audio, Accessories, or Storage.",
             },
             minPrice: {
               type: Type.NUMBER,
@@ -181,40 +228,80 @@ const tools: Tool[] = [
   },
 ];
 
+function formatProductsFallback(
+  products: Array<{
+    name: string;
+    price: number;
+    category: string;
+    rating: number;
+    reviews: number;
+    stock: number;
+    description: string;
+  }>
+) {
+  if (products.length === 0) {
+    return "I couldn't find any matching products in TechStore.";
+  }
+
+  const lines = products.map((product, index) => {
+    return (
+      `${index + 1}. **${product.name}**\n` +
+      `   ₹${product.price.toLocaleString("en-IN")} · ` +
+      `Stock: ${product.stock} · ` +
+      `Rating: ${product.rating}/5 · ` +
+      `${product.category}\n` +
+      `   ${product.description}`
+    );
+  });
+
+  return (
+    `I found ${products.length} matching product${
+      products.length === 1 ? "" : "s"
+    }:\n\n` + lines.join("\n\n")
+  );
+}
+
 export async function generateChatbotResponse(
   message: string,
   userId?: number
 ) {
   const chatbotStart = performance.now();
+
   let response;
 
   // --------------------------------------------------
   // FIRST GEMINI REQUEST
-  // Decide whether tools are required.
   // --------------------------------------------------
 
   try {
-    response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: message.trim() }],
-        },
-      ],
-      config: {
-        systemInstruction: CHATBOT_SYSTEM_PROMPT,
-        tools,
-        toolConfig: {
-          functionCallingConfig: {
-            mode: FunctionCallingConfigMode.AUTO,
+    response = await generateWithRetry(
+      () =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: message.trim() }],
+            },
+          ],
+          config: {
+            systemInstruction: CHATBOT_SYSTEM_PROMPT,
+            tools,
+            toolConfig: {
+              functionCallingConfig: {
+                mode: FunctionCallingConfigMode.AUTO,
+              },
+            },
+            maxOutputTokens: 300,
           },
-        },
-        maxOutputTokens: 300,
-      },
-    });
+        }),
+      "Gemini initial request"
+    );
+
     console.log(
-      `Gemini first request: ${(performance.now() - chatbotStart).toFixed(0)} ms`
+      `Gemini first request: ${(
+        performance.now() - chatbotStart
+      ).toFixed(0)} ms`
     );
   } catch (error) {
     console.error("Gemini initial request error:", error);
@@ -237,14 +324,18 @@ export async function generateChatbotResponse(
   // --------------------------------------------------
 
   if (!functionCalls || functionCalls.length === 0) {
-    return response.text ?? "Sorry, I could not generate a response.";
+    return (
+      response.text ??
+      "Sorry, I could not generate a response."
+    );
   }
 
   // --------------------------------------------------
   // EXECUTE TOOLS
-  // Run independent tool calls in parallel.
   // --------------------------------------------------
+
   const toolStart = performance.now();
+
   const functionResponses = await Promise.all(
     functionCalls.map(async (call) => {
       if (call.name === "searchProducts") {
@@ -266,6 +357,7 @@ export async function generateChatbotResponse(
               products: result,
             },
           },
+          searchResult: result,
         };
       }
 
@@ -334,61 +426,116 @@ export async function generateChatbotResponse(
       };
     })
   );
+
   console.log(
-  `Tool execution: ${(performance.now() - toolStart).toFixed(0)} ms`
-);
+    `Tool execution: ${(
+      performance.now() - toolStart
+    ).toFixed(0)} ms`
+  );
+
+  // --------------------------------------------------
+  // FALLBACK DATA
+  // --------------------------------------------------
+  //
+  // If this was a product search, we already have
+  // verified database data. Keep it as a fallback
+  // in case Gemini's final response request fails.
+  //
+
+  const productSearchResults = functionResponses
+    .filter(
+      (
+        item
+      ): item is typeof item & {
+        searchResult: Array<{
+          name: string;
+          price: number;
+          category: string;
+          rating: number;
+          reviews: number;
+          stock: number;
+          description: string;
+        }>;
+      } => Array.isArray(item.searchResult)
+    )
+    .flatMap((item) => item.searchResult);
 
   // --------------------------------------------------
   // SECOND GEMINI REQUEST
-  // Generate the final natural-language response.
   // --------------------------------------------------
 
   let finalResponse;
 
   try {
-    finalResponse = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: message.trim() }],
-        },
-        {
-          role: "model",
-          parts: response.candidates?.[0]?.content?.parts ?? [],
-        },
-        {
-          role: "user",
-          parts: functionResponses.map((item) => ({
-            functionResponse: {
-              ...item.functionResponse,
-              response:
-                item.functionResponse.response as Record<string, unknown>,
+    finalResponse = await generateWithRetry(
+      () =>
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: message.trim() }],
             },
-          })),
-        },
-      ],
-      config: {
-        systemInstruction: FINAL_RESPONSE_PROMPT,
-        toolConfig: {
-          functionCallingConfig: {
-            mode: FunctionCallingConfigMode.NONE,
+            {
+              role: "model",
+              parts:
+                response.candidates?.[0]?.content?.parts ?? [],
+            },
+            {
+              role: "user",
+              parts: functionResponses.map((item) => ({
+                functionResponse: {
+                  ...item.functionResponse,
+                  response:
+                    item.functionResponse.response as Record<
+                      string,
+                      unknown
+                    >,
+                },
+              })),
+            },
+          ],
+          config: {
+            systemInstruction: FINAL_RESPONSE_PROMPT,
+            toolConfig: {
+              functionCallingConfig: {
+                mode: FunctionCallingConfigMode.NONE,
+              },
+            },
+            maxOutputTokens: 250,
           },
-        },
-        maxOutputTokens: 250,
-      },
-    });
+        }),
+      "Gemini final request"
+    );
+
     console.log(
-      `Chatbot total time: ${(performance.now() - chatbotStart).toFixed(0)} ms`
+      `Chatbot total time: ${(
+        performance.now() - chatbotStart
+      ).toFixed(0)} ms`
     );
   } catch (error) {
     console.error("Gemini final request error:", error);
 
-    if (isGeminiQuotaError(error)) {
-      throw createQuotaError();
-    }
+    // Gemini final response failed, but database search
+    // already succeeded. Return the verified products.
+    if (
+      isGeminiUnavailableError(error) ||
+      isGeminiQuotaError(error)
+    ) {
+      if (productSearchResults.length > 0) {
+        console.warn(
+          "Using verified database product fallback because Gemini final response failed."
+        );
 
-    if (isGeminiUnavailableError(error)) {
+        return formatProductsFallback(
+          productSearchResults
+        );
+      }
+
+      if (isGeminiQuotaError(error)) {
+        throw createQuotaError();
+      }
+
       throw createUnavailableError();
     }
 
@@ -397,12 +544,17 @@ export async function generateChatbotResponse(
 
   console.log("Final chatbot response:", {
     text: finalResponse.text,
-    finishReason: finalResponse.candidates?.[0]?.finishReason,
+    finishReason:
+      finalResponse.candidates?.[0]?.finishReason,
   });
 
-  return (
-    finalResponse.text ??
-    "I found the information, but I could not generate a response."
-  );
-}
+  if (finalResponse.text) {
+    return finalResponse.text;
+  }
 
+  if (productSearchResults.length > 0) {
+    return formatProductsFallback(productSearchResults);
+  }
+
+  return "I found the information, but I could not generate a response.";
+}

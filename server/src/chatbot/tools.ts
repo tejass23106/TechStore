@@ -9,91 +9,161 @@ minRating?: number;
 }
 
 export async function searchProducts(args: ProductSearchArgs) {
-const where: {
-active: boolean;
-name?: { contains: string; mode: "insensitive" };
-category?: { contains: string; mode: "insensitive" };
-price?: { gte?: number; lte?: number };
-rating?: { gte: number };
-} = {
-active: true,
-};
+  const query = args.query?.trim();
+  const category = args.category?.trim();
 
-const query = args.query?.trim();
-const category = args.category?.trim();
+  const where: {
+    active: boolean;
+    AND?: Array<{
+      OR?: Array<{
+        name?: {
+          contains: string;
+          mode: "insensitive";
+        };
+        category?: {
+          contains: string;
+          mode: "insensitive";
+        };
+      }>;
+      category?: {
+        contains: string;
+        mode: "insensitive";
+      };
+      price?: {
+        gte?: number;
+        lte?: number;
+      };
+      rating?: {
+        gte: number;
+      };
+    }>;
+    price?: {
+      gte?: number;
+      lte?: number;
+    };
+    rating?: {
+      gte: number;
+    };
+  } = {
+    active: true,
+  };
 
-if (query) {
-where.name = {
-contains: query,
-mode: "insensitive",
-};
-}
+  const filters: Array<{
+    OR?: Array<{
+      name?: {
+        contains: string;
+        mode: "insensitive";
+      };
+      category?: {
+        contains: string;
+        mode: "insensitive";
+      };
+    }>;
+    category?: {
+      contains: string;
+      mode: "insensitive";
+    };
+    price?: {
+      gte?: number;
+      lte?: number;
+    };
+    rating?: {
+      gte: number;
+    };
+  }> = [];
 
-if (category) {
-where.category = {
-contains: category,
-mode: "insensitive",
-};
-}
+  if (query) {
+    filters.push({
+      OR: [
+        {
+          name: {
+            contains: query,
+            mode: "insensitive",
+          },
+        },
+        {
+          category: {
+            contains: query,
+            mode: "insensitive",
+          },
+        },
+      ],
+    });
+  }
 
-if (
-typeof args.minPrice === "number" ||
-typeof args.maxPrice === "number"
-) {
-where.price = {};
+  if (category) {
+    filters.push({
+      category: {
+        contains: category,
+        mode: "insensitive",
+      },
+    });
+  }
 
+  if (
+    typeof args.minPrice === "number" ||
+    typeof args.maxPrice === "number"
+  ) {
+    const price: {
+      gte?: number;
+      lte?: number;
+    } = {};
 
-if (typeof args.minPrice === "number") {
-  where.price.gte = Math.max(0, args.minPrice);
-}
+    if (typeof args.minPrice === "number") {
+      price.gte = Math.max(0, args.minPrice);
+    }
 
-if (typeof args.maxPrice === "number") {
-  where.price.lte = Math.max(0, args.maxPrice);
-}
+    if (typeof args.maxPrice === "number") {
+      price.lte = Math.max(0, args.maxPrice);
+    }
 
+    filters.push({ price });
+  }
 
-}
+  if (typeof args.minRating === "number") {
+    filters.push({
+      rating: {
+        gte: Math.min(5, Math.max(0, args.minRating)),
+      },
+    });
+  }
 
-if (typeof args.minRating === "number") {
-where.rating = {
-gte: Math.min(5, Math.max(0, args.minRating)),
-};
-}
+  if (filters.length > 0) {
+    where.AND = filters;
+  }
 
-const products = await prisma.product.findMany({
-where,
-orderBy: [
-{ rating: "desc" },
-{ reviews: "desc" },
-],
-take: 10,
-select: {
-id: true,
-name: true,
-price: true,
-category: true,
-rating: true,
-reviews: true,
-stock: true,
-description: true,
-},
-});
+  const products = await prisma.product.findMany({
+    where,
+    orderBy: [
+      { rating: "desc" },
+      { reviews: "desc" },
+    ],
+    take: 10,
+    select: {
+      id: true,
+      name: true,
+      price: true,
+      category: true,
+      rating: true,
+      reviews: true,
+      stock: true,
+      description: true,
+    },
+  });
 
-// Keep descriptions useful but small.
-// This reduces Gemini input tokens without losing the important information.
-return products.map((product) => ({
-id: product.id,
-name: product.name,
-price: product.price,
-category: product.category,
-rating: product.rating,
-reviews: product.reviews,
-stock: product.stock,
-description:
-product.description.length > 220
-? `${product.description.slice(0, 220).trim()}...`
-: product.description,
-}));
+  return products.map((product) => ({
+    id: product.id,
+    name: product.name,
+    price: product.price,
+    category: product.category,
+    rating: product.rating,
+    reviews: product.reviews,
+    stock: product.stock,
+    description:
+      product.description.length > 220
+        ? `${product.description.slice(0, 220).trim()}...`
+        : product.description,
+  }));
 }
 
 export async function getCart(userId: number) {
