@@ -136,10 +136,21 @@ const { name, email, password } = req.body;
     },
   });
 
+  let verificationEmailSent = true;
+
+try {
   await sendEmailVerificationEmail(
     user.email,
     verificationToken
   );
+} catch (emailError) {
+  verificationEmailSent = false;
+
+  console.error(
+    "Verification email could not be sent:",
+    emailError
+  );
+}
 
   const sessionId = createSessionId();
 
@@ -152,11 +163,12 @@ const { name, email, password } = req.body;
   });
 
   setSessionCookie(res, sessionId);
-
-  return res.status(201).json({
-    message:
-      "Registration successful. Please verify your email address.",
-    user: {
+return res.status(201).json({
+  message: verificationEmailSent
+    ? "Registration successful. Please verify your email address."
+    : "Registration successful. Your account was created, but the verification email could not be sent yet.",
+  verificationEmailSent,
+  user: {
       id: user.id,
       name: user.name,
       email: user.email,

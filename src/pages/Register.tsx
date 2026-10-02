@@ -23,9 +23,19 @@ export default function Register() {
     setLoading(true);
 
     try {
-      await register(name, email, password);
+      const result = await register(
+  name,
+  email,
+  password
+);
 
-      navigate("/");
+if (result.verificationEmailSent) {
+  navigate("/");
+} else {
+  setError(
+    "Account created successfully, but the verification email could not be sent yet. Your account remains unverified."
+  );
+}
     } catch (error) {
       setError(
         error instanceof Error

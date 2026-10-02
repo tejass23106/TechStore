@@ -23,15 +23,20 @@ export type User = {
 type AuthContextType = {
   user: User | null;
   loading: boolean;
+
   login: (
     email: string,
     password: string
   ) => Promise<void>;
+
   register: (
     name: string,
     email: string,
     password: string
-  ) => Promise<void>;
+  ) => Promise<{
+    verificationEmailSent?: boolean;
+  }>;
+
   logout: () => Promise<void>;
 };
 
@@ -70,7 +75,10 @@ export function AuthProvider({
     email: string,
     password: string
   ) {
-    const data = await loginUser(email, password);
+    const data = await loginUser(
+      email,
+      password
+    );
 
     if (data?.user) {
       setUser(data.user);
@@ -91,6 +99,11 @@ export function AuthProvider({
     if (data?.user) {
       setUser(data.user);
     }
+
+    return {
+      verificationEmailSent:
+        data?.verificationEmailSent,
+    };
   }
 
   async function logout() {
