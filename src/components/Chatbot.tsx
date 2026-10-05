@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 
 const API_URL =
@@ -9,24 +9,48 @@ interface Message {
   text: string;
 }
 
+const chatbotExamples = [
+  'Try: "Show me laptops"',
+  'Try: "Find phones under ₹50,000"',
+  'Try: "Add OnePlus 13 to the cart"',
+  'Try: "Show me my cart"',
+  'Try: "Compare available phones"',
+];
+
 export default function Chatbot() {
   const [isOpen, setIsOpen] = useState(false);
   const [message, setMessage] = useState("");
+  const [exampleIndex, setExampleIndex] = useState(0);
+  const [loading, setLoading] = useState(false);
+
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "bot",
       text: "Hi! I'm the TechStore assistant. I can help you find products, answer product questions, and manage your cart.",
     },
   ]);
-  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setExampleIndex((index) =>
+        index === chatbotExamples.length - 1 ? 0 : index + 1
+      );
+    }, 3000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
 
   async function sendMessage() {
     const trimmedMessage = message.trim();
 
-    if (!trimmedMessage || loading) return;
+    if (!trimmedMessage || loading) {
+      return;
+    }
 
-    setMessages((prev) => [
-      ...prev,
+    setMessages((previousMessages) => [
+      ...previousMessages,
       {
         role: "user",
         text: trimmedMessage,
@@ -52,15 +76,18 @@ export default function Chatbot() {
 
       if (!response.ok) {
         throw new Error(
-          data.message || "Unable to contact the TechStore AI assistant."
+          data.message ||
+            "Unable to contact the TechStore AI assistant."
         );
       }
 
-      setMessages((prev) => [
-        ...prev,
+      setMessages((previousMessages) => [
+        ...previousMessages,
         {
           role: "bot",
-          text: data.reply || "Sorry, I couldn't generate a response.",
+          text:
+            data.reply ||
+            "Sorry, I couldn't generate a response.",
         },
       ]);
     } catch (error) {
@@ -71,8 +98,8 @@ export default function Chatbot() {
           ? error.message
           : "Sorry, something went wrong. Please try again.";
 
-      setMessages((prev) => [
-        ...prev,
+      setMessages((previousMessages) => [
+        ...previousMessages,
         {
           role: "bot",
           text: errorMessage,
@@ -91,18 +118,30 @@ export default function Chatbot() {
     }
   }
 
+  function useExample(example: string) {
+    const cleanExample = example
+      .replace(/^Try:\s*/, "")
+      .replace(/^"|"$/g, "");
+
+    setMessage(cleanExample);
+  }
+
   return (
     <>
+      {/* Chatbot Button */}
       <button
         onClick={() => setIsOpen((open) => !open)}
-        className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-black text-2xl text-white shadow-lg transition hover:scale-105 hover:bg-gray-800"
+        className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-black text-sm font-medium text-white shadow-lg transition hover:scale-105 hover:bg-gray-800"
         aria-label="Open TechStore chatbot"
       >
-        {isOpen ? "✕" : "💬"}
+        {isOpen ? "X" : "Chat"}
       </button>
 
+      {/* Chatbot */}
       {isOpen && (
         <div className="fixed bottom-24 right-6 z-50 flex h-[520px] w-[360px] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl">
+
+          {/* Header */}
           <div className="flex items-center justify-between bg-black px-4 py-4 text-white">
             <div>
               <h2 className="font-semibold">
@@ -119,10 +158,11 @@ export default function Chatbot() {
               className="text-xl text-gray-300 hover:text-white"
               aria-label="Close chatbot"
             >
-              ✕
+              X
             </button>
           </div>
 
+          {/* Messages */}
           <div className="flex-1 space-y-3 overflow-y-auto bg-gray-50 p-4">
             {messages.map((item, index) => (
               <div
@@ -141,55 +181,62 @@ export default function Chatbot() {
                   }`}
                 >
                   {item.role === "bot" ? (
-  <ReactMarkdown
-    components={{
-      h1: ({ children }) => (
-        <h1 className="mb-2 text-base font-bold text-gray-900">
-          {children}
-        </h1>
-      ),
-      h2: ({ children }) => (
-        <h2 className="mb-2 text-sm font-bold text-gray-900">
-          {children}
-        </h2>
-      ),
-      h3: ({ children }) => (
-        <h3 className="mb-1 text-sm font-semibold text-gray-900">
-          {children}
-        </h3>
-      ),
-      p: ({ children }) => (
-        <p className="mb-2 leading-6 last:mb-0">
-          {children}
-        </p>
-      ),
-      ul: ({ children }) => (
-        <ul className="mb-2 list-disc space-y-1 pl-5">
-          {children}
-        </ul>
-      ),
-      ol: ({ children }) => (
-        <ol className="mb-2 list-decimal space-y-1 pl-5">
-          {children}
-        </ol>
-      ),
-      li: ({ children }) => (
-        <li className="leading-5">
-          {children}
-        </li>
-      ),
-      strong: ({ children }) => (
-        <strong className="font-semibold text-gray-900">
-          {children}
-        </strong>
-      ),
-    }}
-  >
-    {item.text}
-  </ReactMarkdown>
-) : (
-  item.text
-)}
+                    <ReactMarkdown
+                      components={{
+                        h1: ({ children }) => (
+                          <h1 className="mb-2 text-base font-bold text-gray-900">
+                            {children}
+                          </h1>
+                        ),
+
+                        h2: ({ children }) => (
+                          <h2 className="mb-2 text-sm font-bold text-gray-900">
+                            {children}
+                          </h2>
+                        ),
+
+                        h3: ({ children }) => (
+                          <h3 className="mb-1 text-sm font-semibold text-gray-900">
+                            {children}
+                          </h3>
+                        ),
+
+                        p: ({ children }) => (
+                          <p className="mb-2 leading-6 last:mb-0">
+                            {children}
+                          </p>
+                        ),
+
+                        ul: ({ children }) => (
+                          <ul className="mb-2 list-disc space-y-1 pl-5">
+                            {children}
+                          </ul>
+                        ),
+
+                        ol: ({ children }) => (
+                          <ol className="mb-2 list-decimal space-y-1 pl-5">
+                            {children}
+                          </ol>
+                        ),
+
+                        li: ({ children }) => (
+                          <li className="leading-5">
+                            {children}
+                          </li>
+                        ),
+
+                        strong: ({ children }) => (
+                          <strong className="font-semibold text-gray-900">
+                            {children}
+                          </strong>
+                        ),
+                      }}
+                    >
+                      {item.text}
+                    </ReactMarkdown>
+                  ) : (
+                    item.text
+                  )}
                 </div>
               </div>
             ))}
@@ -203,7 +250,21 @@ export default function Chatbot() {
             )}
           </div>
 
+          {/* Input Section */}
           <div className="border-t border-gray-200 bg-white p-3">
+
+            {/* Visible Example */}
+            <button
+              type="button"
+              onClick={() =>
+                useExample(chatbotExamples[exampleIndex])
+              }
+              className="mb-2 block w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-left text-xs text-gray-600 transition hover:border-gray-400 hover:bg-gray-100"
+            >
+              {chatbotExamples[exampleIndex]}
+            </button>
+
+            {/* Input */}
             <div className="flex gap-2">
               <input
                 type="text"
@@ -218,6 +279,7 @@ export default function Chatbot() {
               />
 
               <button
+                type="button"
                 onClick={sendMessage}
                 disabled={loading || !message.trim()}
                 className="rounded-xl bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
@@ -231,3 +293,4 @@ export default function Chatbot() {
     </>
   );
 }
+
