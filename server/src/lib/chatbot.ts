@@ -389,79 +389,54 @@ function formatProductsFallback(
   const wantsRecommendation =
     lower.includes("recommend") ||
     lower.includes("best") ||
-    lower.includes("which one") ||
-    lower.includes("suggest");
+    lower.includes("suggest") ||
+    lower.includes("which one");
 
   const wantsComparison =
     lower.includes("compare") ||
     lower.includes("comparison") ||
     lower.includes("difference") ||
-    lower.includes("vs ");
-
-  const sortedProducts = [...products].sort((a, b) => {
-    if (b.rating !== a.rating) {
-      return b.rating - a.rating;
-    }
-
-    if (b.reviews !== a.reviews) {
-      return b.reviews - a.reviews;
-    }
-
-    return a.price - b.price;
-  });
-
-  const recommended = sortedProducts[0];
+    lower.includes(" vs ");
 
   const productList = products
     .map((product, index) => {
-      const stockText =
+      const availability =
         product.stock > 0
-          ? `${product.stock} in stock`
-          : "Out of stock";
+          ? `${product.stock} available`
+          : "Currently out of stock";
 
       return (
         `### ${index + 1}. ${product.name}\n\n` +
-        `**Price:** ₹${product.price.toLocaleString("en-IN")}\n` +
-        `**Rating:** ${product.rating}/5 (${product.reviews} reviews)\n` +
-        `**Availability:** ${stockText}\n` +
-        `**Category:** ${product.category}\n\n` +
-        `${product.description}`
+        `**₹${product.price.toLocaleString("en-IN")}**\n\n` +
+        `${product.description}\n\n` +
+        `**Category:** ${product.category}  \n` +
+        `**Availability:** ${availability}`
       );
     })
     .join("\n\n---\n\n");
 
-  if (wantsRecommendation) {
-    return (
-      `## Recommended Products\n\n` +
-      `I found ${products.length} matching product${
-        products.length === 1 ? "" : "s"
-      } in the TechStore catalog.\n\n` +
-      productList +
-      `\n\n---\n\n` +
-      `### Recommendation\n\n` +
-      `**${recommended.name}** is the top-rated match among the available products, ` +
-      `with a rating of ${recommended.rating}/5 from ${recommended.reviews} reviews.\n\n` +
-      `Price: ₹${recommended.price.toLocaleString("en-IN")}`
-    );
-  }
-
   if (wantsComparison) {
     return (
       `## Product Comparison\n\n` +
-      `Here are the matching products currently available in the TechStore catalog.\n\n` +
+      `Here are the products currently available in the TechStore catalog:\n\n` +
+      productList
+    );
+  }
+
+  if (wantsRecommendation) {
+    return (
+      `## Recommended Options\n\n` +
+      `I found ${products.length} matching products in the TechStore catalog:\n\n` +
       productList +
       `\n\n---\n\n` +
-      `### Top-Rated Option\n\n` +
-      `**${recommended.name}** — ` +
-      `${recommended.rating}/5 from ${recommended.reviews} reviews.`
+      `**Recommendation:** I don't have enough reliable review data in the current catalog to make a meaningful rating-based recommendation. ` +
+      `You can compare the products above based on price, specifications, and availability.`
     );
   }
 
   return (
     `## Available Products\n\n` +
-    `I found ${products.length} matching product${
-      products.length === 1 ? "" : "s"
-    } in the TechStore catalog.\n\n` +
+    `I found ${products.length} matching products in the TechStore catalog:\n\n` +
     productList
   );
 }
