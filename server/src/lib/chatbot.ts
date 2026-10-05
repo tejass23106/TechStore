@@ -395,51 +395,75 @@ function formatProductsFallback(
   const wantsComparison =
     lower.includes("compare") ||
     lower.includes("comparison") ||
-    lower.includes("difference");
+    lower.includes("difference") ||
+    lower.includes("vs ");
 
-  const lines = products.map((product, index) => {
-    return (
-      `${index + 1}. **${product.name}**\n` +
-      `   ₹${product.price.toLocaleString("en-IN")} · ` +
-      `Stock: ${product.stock} · ` +
-      `Rating: ${product.rating}/5 · ` +
-      `${product.reviews} reviews · ` +
-      `${product.category}\n` +
-      `   ${product.description}`
-    );
+  const sortedProducts = [...products].sort((a, b) => {
+    if (b.rating !== a.rating) {
+      return b.rating - a.rating;
+    }
+
+    if (b.reviews !== a.reviews) {
+      return b.reviews - a.reviews;
+    }
+
+    return a.price - b.price;
   });
 
-  let intro = `I found ${products.length} matching product${
-    products.length === 1 ? "" : "s"
-  }:`;
+  const recommended = sortedProducts[0];
 
-  if (wantsRecommendation && products.length > 0) {
-    const recommended = [...products].sort((a, b) => {
-      if (b.rating !== a.rating) {
-        return b.rating - a.rating;
-      }
+  const productList = products
+    .map((product, index) => {
+      const stockText =
+        product.stock > 0
+          ? `${product.stock} in stock`
+          : "Out of stock";
 
-      if (b.reviews !== a.reviews) {
-        return b.reviews - a.reviews;
-      }
+      return (
+        `### ${index + 1}. ${product.name}\n\n` +
+        `**Price:** ₹${product.price.toLocaleString("en-IN")}\n` +
+        `**Rating:** ${product.rating}/5 (${product.reviews} reviews)\n` +
+        `**Availability:** ${stockText}\n` +
+        `**Category:** ${product.category}\n\n` +
+        `${product.description}`
+      );
+    })
+    .join("\n\n---\n\n");
 
-      return a.price - b.price;
-    })[0];
-
-    intro =
+  if (wantsRecommendation) {
+    return (
+      `## Recommended Products\n\n` +
       `I found ${products.length} matching product${
         products.length === 1 ? "" : "s"
-      }.\n\n` +
-      `**Recommendation:** ${recommended.name} — ` +
-      `₹${recommended.price.toLocaleString("en-IN")} ` +
-      `with a ${recommended.rating}/5 rating. ` +
-      `This recommendation is based on the TechStore catalog's rating/review data.`;
-  } else if (wantsComparison) {
-    intro =
-      `Here are the ${products.length} matching TechStore products to compare:`;
+      } in the TechStore catalog.\n\n` +
+      productList +
+      `\n\n---\n\n` +
+      `### Recommendation\n\n` +
+      `**${recommended.name}** is the top-rated match among the available products, ` +
+      `with a rating of ${recommended.rating}/5 from ${recommended.reviews} reviews.\n\n` +
+      `Price: ₹${recommended.price.toLocaleString("en-IN")}`
+    );
   }
 
-  return `${intro}\n\n${lines.join("\n\n")}`;
+  if (wantsComparison) {
+    return (
+      `## Product Comparison\n\n` +
+      `Here are the matching products currently available in the TechStore catalog.\n\n` +
+      productList +
+      `\n\n---\n\n` +
+      `### Top-Rated Option\n\n` +
+      `**${recommended.name}** — ` +
+      `${recommended.rating}/5 from ${recommended.reviews} reviews.`
+    );
+  }
+
+  return (
+    `## Available Products\n\n` +
+    `I found ${products.length} matching product${
+      products.length === 1 ? "" : "s"
+    } in the TechStore catalog.\n\n` +
+    productList
+  );
 }
 
 /* -------------------------------------------------------------------------- */
