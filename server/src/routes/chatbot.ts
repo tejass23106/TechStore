@@ -1,12 +1,12 @@
 import { Router } from "express";
 
 import prisma from "../lib/prisma.js";
-
+import { chatbotRateLimiter } from "../Middleware/rateLimit.js";
 import { generateChatbotResponse } from "../lib/chatbot.js";
 
 const router = Router();
 
-router.post("/", async (req, res) => {
+router.post("/", chatbotRateLimiter, async (req, res) => {
   try {
     const { message } = req.body;
 

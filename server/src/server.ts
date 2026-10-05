@@ -16,6 +16,7 @@ import razorpayWebhookRouter from "./routes/razorpayWebhook.js";
 import chatbotRouter from "./routes/chatbot.js";
 import subscriptionRouter from "./routes/subscription.js";
 import proFeaturesRouter from "./routes/proFeatures.js";
+import { apiRateLimiter } from "./Middleware/rateLimit.js";
 
 dotenv.config();
 
@@ -44,6 +45,29 @@ limit: "1mb",
 }),
 razorpayWebhookRouter
 );
+// CSRF/origin protection for browser state-changing requests.
+// Razorpay webhook is excluded because it uses signature verification.
+app.use((req, res, next) => {
+  const stateChangingMethod = ["POST", "PUT", "PATCH", "DELETE"].includes(
+    req.method
+  );
+
+  if (!stateChangingMethod) {
+    return next();
+  }
+
+  const requestOrigin = req.get("origin");
+
+  if (!requestOrigin || requestOrigin !== FRONTEND_URL) {
+    return res.status(403).json({
+      message: "Request origin is not allowed",
+    });
+  }
+
+  return next();
+});
+
+app.use(apiRateLimiter);
 
 app.use(express.json());
 
