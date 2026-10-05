@@ -118,7 +118,7 @@ An administrator can:
 * Manage orders
 * Update order status
 * Manage reviews
-* Manage users where supported by the administration interface
+* View registered users and their order information where supported by the administration interface
 * Access administrative information unavailable to normal customers
 
 The backend enforces authorization, so hiding the admin interface on the frontend is not the only protection.
@@ -818,7 +818,9 @@ and:
 * EXPIRED
 * CANCELLED
 
-This code exists in the project, although recurring Pro subscription is not part of the currently prioritized production scope.
+> Note: Subscription and recurring Razorpay functionality exists in the
+> codebase as an extended/experimental feature, but recurring subscriptions
+> are not part of the current production scope.
 
 ---
 
@@ -1623,6 +1625,17 @@ The sender address is configured through environment variables.
 A production limitation currently exists with Resend's unverified-domain/testing configuration: sending to arbitrary external recipients requires an appropriately verified sending domain.
 
 The application is therefore designed so that email delivery failure does not unnecessarily break core account creation/payment flows.
+
+### Email delivery note
+
+TechStore uses Resend for transactional email delivery.
+
+Without a verified sending domain, Resend's production sending restrictions
+may limit verification emails to the account owner's email address.
+
+The application still allows account creation when email delivery is
+temporarily unavailable, while keeping the account unverified until
+verification is completed.
 
 ---
 

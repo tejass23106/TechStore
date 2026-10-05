@@ -41,19 +41,19 @@ export default function Footer() {
 
               <li>
                 <a
-                  href="/products?category=Phones"
+                  href="/products?category=Smartphones"
                   className="transition hover:text-gray-900"
                 >
-                  Phones
+                  Smartphones
                 </a>
               </li>
 
               <li>
                 <a
-                  href="/products?category=Monitors"
+                  href="/products?category=Gaming"
                   className="transition hover:text-gray-900"
                 >
-                  Monitors
+                  Gaming
                 </a>
               </li>
 
