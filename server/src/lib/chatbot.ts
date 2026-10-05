@@ -25,6 +25,10 @@ const ai = new GoogleGenAI({
 
 const GEMINI_MODEL = "gemini-3.6-flash";
 
+/* -------------------------------------------------------------------------- */
+/* PROMPTS                                                                    */
+/* -------------------------------------------------------------------------- */
+
 const CHATBOT_SYSTEM_PROMPT =
   "You are TechStore AI, a fast shopping assistant for TechStore. " +
   "Use tool results as the only source of truth for TechStore data. " +
@@ -44,6 +48,10 @@ const FINAL_RESPONSE_PROMPT =
   "Answer concisely in Markdown using ₹ for prices. " +
   "Do not call tools.";
 
+/* -------------------------------------------------------------------------- */
+/* ERROR HELPERS                                                              */
+/* -------------------------------------------------------------------------- */
+
 function getErrorText(error: unknown) {
   return [
     error instanceof Error ? error.message : "",
@@ -57,10 +65,10 @@ function isGeminiQuotaError(error: unknown) {
   const text = getErrorText(error);
 
   return (
-    text.includes("429") ||
-    text.includes("resource_exhausted") ||
+    text.includes("quota_exceeded") ||
     text.includes("quota exceeded") ||
-    text.includes("generate_content_free_tier_requests")
+    text.includes("generate_content_free_tier_requests") ||
+    text.includes("resource_exhausted")
   );
 }
 
@@ -71,23 +79,24 @@ function isGeminiUnavailableError(error: unknown) {
     text.includes("503") ||
     text.includes("service unavailable") ||
     text.includes("currently experiencing high demand") ||
-    text.includes("status: unavailable")
+    text.includes("status: unavailable") ||
+    text.includes("unavailable")
   );
 }
 
 function createQuotaError() {
   return new Error(
     "TechStore AI is temporarily unavailable.\n\n" +
-      "The Gemini free-tier request quota has been reached.\n\n" +
-      "Please try again after the quota resets."
+      "The Gemini daily AI quota has been reached.\n\n" +
+      "Product search is still available directly from the TechStore catalog."
   );
 }
 
 function createUnavailableError() {
   return new Error(
     "TechStore AI is temporarily busy.\n\n" +
-      "The Gemini AI service is currently experiencing high demand.\n\n" +
-      "Please try again in a few minutes. Your TechStore account, cart, and products are not affected."
+      "The Gemini AI service is currently unavailable.\n\n" +
+      "Your TechStore account, cart, orders, and products are not affected."
   );
 }
 
@@ -96,8 +105,12 @@ function sleep(ms: number) {
 }
 
 /**
- * Gemini can temporarily return 503/429.
- * Retry only transient Gemini failures.
+ * Retry only genuine transient Gemini service failures.
+ *
+ * IMPORTANT:
+ * Daily quota exhaustion is NOT retried.
+ * Retrying a daily quota error only wastes time and creates
+ * unnecessary requests.
  */
 async function generateWithRetry<T>(
   request: () => Promise<T>,
@@ -112,9 +125,12 @@ async function generateWithRetry<T>(
     } catch (error) {
       lastError = error;
 
-      const isTransient =
-        isGeminiUnavailableError(error) ||
-        isGeminiQuotaError(error);
+      // Never retry a daily quota exhaustion error.
+      if (isGeminiQuotaError(error)) {
+        throw error;
+      }
+
+      const isTransient = isGeminiUnavailableError(error);
 
       if (!isTransient || attempt === maxAttempts) {
         throw error;
@@ -134,6 +150,301 @@ async function generateWithRetry<T>(
 
   throw lastError;
 }
+
+/* -------------------------------------------------------------------------- */
+/* PRODUCT QUERY DETECTION                                                    */
+/* -------------------------------------------------------------------------- */
+
+const CATEGORY_ALIASES: Record<string, string> = {
+  laptop: "Laptops",
+  laptops: "Laptops",
+
+  phone: "Phones",
+  phones: "Phones",
+  smartphone: "Phones",
+  smartphones: "Phones",
+  mobile: "Phones",
+  mobiles: "Phones",
+
+  gaming: "Gaming",
+  game: "Gaming",
+  games: "Gaming",
+
+  audio: "Audio",
+  headphone: "Audio",
+  headphones: "Audio",
+  earphone: "Audio",
+  earphones: "Audio",
+  earbuds: "Audio",
+
+  accessory: "Accessories",
+  accessories: "Accessories",
+
+  storage: "Storage",
+  ssd: "Storage",
+};
+
+/**
+ * Returns a known TechStore category when the user explicitly mentions one.
+ */
+function detectCategory(message: string): string | undefined {
+  const lower = message.toLowerCase();
+
+  for (const [alias, category] of Object.entries(CATEGORY_ALIASES)) {
+    const pattern = new RegExp(`\\b${alias}\\b`, "i");
+
+    if (pattern.test(lower)) {
+      return category;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Converts Indian-style money strings:
+ *
+ * 10000
+ * 10,000
+ * ₹10,000
+ * 1 lakh
+ * ₹1 lakh
+ */
+function parseMoneyValue(value: string): number | undefined {
+  let cleaned = value
+    .toLowerCase()
+    .replace(/₹/g, "")
+    .replace(/,/g, "")
+    .trim();
+
+  const lakhMatch = cleaned.match(/^(\d+(?:\.\d+)?)\s*l(?:akh)?$/i);
+
+  if (lakhMatch) {
+    const amount = Number(lakhMatch[1]);
+
+    if (Number.isFinite(amount)) {
+      return amount * 100000;
+    }
+  }
+
+  cleaned = cleaned.replace(/[^\d.]/g, "");
+
+  if (!cleaned) {
+    return undefined;
+  }
+
+  const amount = Number(cleaned);
+
+  return Number.isFinite(amount) ? amount : undefined;
+}
+
+/**
+ * Detect max-price queries such as:
+ *
+ * under ₹10,000
+ * below 10000
+ * less than 1 lakh
+ * within ₹50,000
+ * up to 50000
+ */
+function detectMaxPrice(message: string): number | undefined {
+  const lower = message.toLowerCase();
+
+  const patterns = [
+    /(?:under|below|less than|up to|upto|within|max(?:imum)?(?: price)?(?: of)?|budget(?: of)?|around)\s*(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d+)?)\s*(lakh|l)?/i,
+
+    /(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d+)?)\s*(lakh|l)?\s*(?:or less|and below|maximum|max)?/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = lower.match(pattern);
+
+    if (!match) {
+      continue;
+    }
+
+    const numberPart = match[1];
+    const suffix = match[2];
+
+    const rawValue = suffix
+      ? `${numberPart} ${suffix}`
+      : numberPart;
+
+    const value = parseMoneyValue(rawValue);
+
+    if (typeof value === "number") {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Detect minimum-price queries such as:
+ *
+ * above 50000
+ * over ₹1 lakh
+ * more than 50000
+ */
+function detectMinPrice(message: string): number | undefined {
+  const lower = message.toLowerCase();
+
+  const pattern =
+    /(?:above|over|more than|greater than|starting from|from)\s*(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d+)?)\s*(lakh|l)?/i;
+
+  const match = lower.match(pattern);
+
+  if (!match) {
+    return undefined;
+  }
+
+  const rawValue = match[2]
+    ? `${match[1]} ${match[2]}`
+    : match[1];
+
+  return parseMoneyValue(rawValue);
+}
+
+/**
+ * Product-related words that strongly indicate the user is asking
+ * about the TechStore catalog rather than general conversation.
+ */
+function isProductSearchIntent(message: string): boolean {
+  const lower = message.toLowerCase();
+
+  // Explicit cart operations should remain handled by Gemini tools.
+  if (
+    lower.includes("add to cart") ||
+    lower.includes("remove from cart") ||
+    lower.includes("clear cart") ||
+    lower.includes("empty cart") ||
+    lower.includes("my cart") ||
+    /\bcart\b/.test(lower)
+  ) {
+    return false;
+  }
+
+  if (
+    detectCategory(message) ||
+    detectMaxPrice(message) !== undefined ||
+    detectMinPrice(message) !== undefined
+  ) {
+    return true;
+  }
+
+  const productWords = [
+    "product",
+    "products",
+    "buy",
+    "available",
+    "availability",
+    "show me",
+    "list",
+    "find",
+    "search",
+    "recommend",
+    "recommendation",
+    "compare",
+    "comparison",
+    "catalog",
+    "price",
+    "prices",
+    "stock",
+    "rating",
+    "ratings",
+  ];
+
+  return productWords.some((word) => lower.includes(word));
+}
+
+/* -------------------------------------------------------------------------- */
+/* VERIFIED DATABASE PRODUCT RESPONSE                                         */
+/* -------------------------------------------------------------------------- */
+
+type ProductResult = {
+  id?: number;
+  name: string;
+  price: number;
+  category: string;
+  rating: number;
+  reviews: number;
+  stock: number;
+  description: string;
+};
+
+function formatProductsFallback(
+  products: ProductResult[],
+  message?: string
+) {
+  if (products.length === 0) {
+    return (
+      "I couldn't find any matching products in TechStore.\n\n" +
+      "Try a different category, product name, or budget."
+    );
+  }
+
+  const lower = message?.toLowerCase() ?? "";
+
+  const wantsRecommendation =
+    lower.includes("recommend") ||
+    lower.includes("best") ||
+    lower.includes("which one") ||
+    lower.includes("suggest");
+
+  const wantsComparison =
+    lower.includes("compare") ||
+    lower.includes("comparison") ||
+    lower.includes("difference");
+
+  const lines = products.map((product, index) => {
+    return (
+      `${index + 1}. **${product.name}**\n` +
+      `   ₹${product.price.toLocaleString("en-IN")} · ` +
+      `Stock: ${product.stock} · ` +
+      `Rating: ${product.rating}/5 · ` +
+      `${product.reviews} reviews · ` +
+      `${product.category}\n` +
+      `   ${product.description}`
+    );
+  });
+
+  let intro = `I found ${products.length} matching product${
+    products.length === 1 ? "" : "s"
+  }:`;
+
+  if (wantsRecommendation && products.length > 0) {
+    const recommended = [...products].sort((a, b) => {
+      if (b.rating !== a.rating) {
+        return b.rating - a.rating;
+      }
+
+      if (b.reviews !== a.reviews) {
+        return b.reviews - a.reviews;
+      }
+
+      return a.price - b.price;
+    })[0];
+
+    intro =
+      `I found ${products.length} matching product${
+        products.length === 1 ? "" : "s"
+      }.\n\n` +
+      `**Recommendation:** ${recommended.name} — ` +
+      `₹${recommended.price.toLocaleString("en-IN")} ` +
+      `with a ${recommended.rating}/5 rating. ` +
+      `This recommendation is based on the TechStore catalog's rating/review data.`;
+  } else if (wantsComparison) {
+    intro =
+      `Here are the ${products.length} matching TechStore products to compare:`;
+  }
+
+  return `${intro}\n\n${lines.join("\n\n")}`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* GEMINI TOOLS                                                               */
+/* -------------------------------------------------------------------------- */
 
 const tools: Tool[] = [
   {
@@ -228,50 +539,84 @@ const tools: Tool[] = [
   },
 ];
 
-function formatProductsFallback(
-  products: Array<{
-    name: string;
-    price: number;
-    category: string;
-    rating: number;
-    reviews: number;
-    stock: number;
-    description: string;
-  }>
-) {
-  if (products.length === 0) {
-    return "I couldn't find any matching products in TechStore.";
-  }
-
-  const lines = products.map((product, index) => {
-    return (
-      `${index + 1}. **${product.name}**\n` +
-      `   ₹${product.price.toLocaleString("en-IN")} · ` +
-      `Stock: ${product.stock} · ` +
-      `Rating: ${product.rating}/5 · ` +
-      `${product.category}\n` +
-      `   ${product.description}`
-    );
-  });
-
-  return (
-    `I found ${products.length} matching product${
-      products.length === 1 ? "" : "s"
-    }:\n\n` + lines.join("\n\n")
-  );
-}
+/* -------------------------------------------------------------------------- */
+/* MAIN CHATBOT                                                               */
+/* -------------------------------------------------------------------------- */
 
 export async function generateChatbotResponse(
   message: string,
   userId?: number
 ) {
+  const trimmedMessage = message.trim();
+
+  if (!trimmedMessage) {
+    return "Please tell me what you're looking for.";
+  }
+
+  /*
+   * ------------------------------------------------------------------------
+   * DATABASE-FIRST PRODUCT SEARCH
+   * ------------------------------------------------------------------------
+   *
+   * This is the most important change.
+   *
+   * Product searches no longer need Gemini just to retrieve products.
+   * This means:
+   *
+   *   "show me laptops"
+   *   "show me all laptops"
+   *   "phones under 80000"
+   *   "what can I buy under 10000"
+   *   "compare phones"
+   *
+   * continue working even when Gemini's API quota is exhausted.
+   *
+   * Product information always comes directly from Prisma/Neon.
+   */
+
+  if (isProductSearchIntent(trimmedMessage)) {
+    const category = detectCategory(trimmedMessage);
+    const maxPrice = detectMaxPrice(trimmedMessage);
+    const minPrice = detectMinPrice(trimmedMessage);
+
+    const productResults = await searchProducts({
+      category,
+      minPrice,
+      maxPrice,
+    });
+
+    console.log("Database-first product search:", {
+      message: trimmedMessage,
+      category,
+      minPrice,
+      maxPrice,
+      resultCount: productResults.length,
+    });
+
+    return formatProductsFallback(
+      productResults as ProductResult[],
+      trimmedMessage
+    );
+  }
+
+  /*
+   * ------------------------------------------------------------------------
+   * GEMINI
+   * ------------------------------------------------------------------------
+   *
+   * Gemini is still used for:
+   *
+   * - natural-language questions
+   * - cart operations
+   * - authenticated cart queries
+   * - more complex conversations
+   *
+   * Product catalog retrieval is no longer dependent on this section.
+   */
+
   const chatbotStart = performance.now();
 
   let response;
-
-  // --------------------------------------------------
-  // FIRST GEMINI REQUEST
-  // --------------------------------------------------
 
   try {
     response = await generateWithRetry(
@@ -281,7 +626,7 @@ export async function generateChatbotResponse(
           contents: [
             {
               role: "user",
-              parts: [{ text: message.trim() }],
+              parts: [{ text: trimmedMessage }],
             },
           ],
           config: {
@@ -319,10 +664,9 @@ export async function generateChatbotResponse(
 
   const functionCalls = response.functionCalls;
 
-  // --------------------------------------------------
-  // NO TOOL REQUIRED
-  // --------------------------------------------------
-
+  /*
+   * Gemini answered without using a tool.
+   */
   if (!functionCalls || functionCalls.length === 0) {
     return (
       response.text ??
@@ -330,9 +674,9 @@ export async function generateChatbotResponse(
     );
   }
 
-  // --------------------------------------------------
-  // EXECUTE TOOLS
-  // --------------------------------------------------
+  /* ---------------------------------------------------------------------- */
+  /* TOOL EXECUTION                                                         */
+  /* ---------------------------------------------------------------------- */
 
   const toolStart = performance.now();
 
@@ -433,37 +777,24 @@ export async function generateChatbotResponse(
     ).toFixed(0)} ms`
   );
 
-  // --------------------------------------------------
-  // FALLBACK DATA
-  // --------------------------------------------------
-  //
-  // If this was a product search, we already have
-  // verified database data. Keep it as a fallback
-  // in case Gemini's final response request fails.
-  //
+  /* ---------------------------------------------------------------------- */
+  /* VERIFIED DATABASE FALLBACK                                             */
+  /* ---------------------------------------------------------------------- */
 
   const productSearchResults = functionResponses
     .filter(
       (
         item
       ): item is typeof item & {
-        searchResult: Array<{
-          name: string;
-          price: number;
-          category: string;
-          rating: number;
-          reviews: number;
-          stock: number;
-          description: string;
-        }>;
+        searchResult: ProductResult[];
       } => Array.isArray(item.searchResult)
     )
     .flatMap((item) => item.searchResult);
 
-  // --------------------------------------------------
-  // SECOND GEMINI REQUEST
-  // --------------------------------------------------
-
+  /*
+   * If Gemini itself fails after a successful database search,
+   * return the already verified database results.
+   */
   let finalResponse;
 
   try {
@@ -474,7 +805,7 @@ export async function generateChatbotResponse(
           contents: [
             {
               role: "user",
-              parts: [{ text: message.trim() }],
+              parts: [{ text: trimmedMessage }],
             },
             {
               role: "model",
@@ -516,8 +847,10 @@ export async function generateChatbotResponse(
   } catch (error) {
     console.error("Gemini final request error:", error);
 
-    // Gemini final response failed, but database search
-    // already succeeded. Return the verified products.
+    /*
+     * Database product data already exists, so Gemini does not
+     * need to succeed for us to provide a useful product response.
+     */
     if (
       isGeminiUnavailableError(error) ||
       isGeminiQuotaError(error)
@@ -528,7 +861,8 @@ export async function generateChatbotResponse(
         );
 
         return formatProductsFallback(
-          productSearchResults
+          productSearchResults,
+          trimmedMessage
         );
       }
 
@@ -553,7 +887,10 @@ export async function generateChatbotResponse(
   }
 
   if (productSearchResults.length > 0) {
-    return formatProductsFallback(productSearchResults);
+    return formatProductsFallback(
+      productSearchResults,
+      trimmedMessage
+    );
   }
 
   return "I found the information, but I could not generate a response.";
