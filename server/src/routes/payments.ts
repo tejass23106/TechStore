@@ -19,6 +19,7 @@ import {
 } from "../Middleware/auth.js";
 
 import { sendPaymentConfirmationEmail } from "../lib/email.js";
+import { processLateCaptureRefund } from "../lib/refunds.js";
 
 const router = Router();
 
@@ -92,6 +93,16 @@ router.post(
       if (order.paymentStatus !== "PENDING") {
         return res.status(400).json({
           message: "Payment has already been processed for this order",
+        });
+      }
+
+      if (
+        !order.stockReserved ||
+        (order.reservationExpiresAt && order.reservationExpiresAt <= new Date())
+      ) {
+        return res.status(400).json({
+          message:
+            "Stock reservation for this order has expired. Please place a new order.",
         });
       }
 
@@ -224,17 +235,18 @@ router.post(
   requireAuth,
   validate(verifyPaymentSchema),
   async (req: AuthenticatedRequest, res) => {
+    const {
+      orderId,
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+    } = req.body;
+
+    const parsedOrderId = Number(orderId);
+    let expectedAmount = 0;
+
     try {
       const userId = req.userId!;
-
-      const {
-        orderId,
-        razorpayOrderId,
-        razorpayPaymentId,
-        razorpaySignature,
-      } = req.body;
-
-      const parsedOrderId = Number(orderId);
 
       if (
         !Number.isInteger(parsedOrderId) ||
@@ -262,33 +274,8 @@ router.post(
       }
 
       /**
-      * Idempotency.
-      */
-      if (order.paymentStatus === "PAID") {
-        return res.json({
-          message: "Payment already verified",
-          orderId: order.id,
-          paymentStatus: order.paymentStatus,
-          status: order.status,
-        });
-      }
-
-      if (order.status !== "PENDING") {
-        return res.status(400).json({
-          message: "This order is no longer pending",
-        });
-      }
-
-      if (order.paymentStatus !== "PENDING") {
-        return res.status(400).json({
-          message: "Payment has already been processed",
-        });
-      }
-
-      /**
-      * Make sure the Razorpay order belongs to this
-      * TechStore order.
-      */
+       * Make sure the Razorpay order belongs to this TechStore order.
+       */
       if (order.razorpayOrderId !== razorpayOrderId) {
         return res.status(400).json({
           message: "Razorpay order ID does not match",
@@ -305,8 +292,8 @@ router.post(
       }
 
       /**
-      * Verify Razorpay signature.
-      */
+       * Verify Razorpay signature.
+       */
       const generatedSignature = crypto
         .createHmac("sha256", razorpayKeySecret)
         .update(
@@ -327,6 +314,41 @@ router.post(
         });
       }
 
+      /**
+       * Idempotency check for already-paid orders.
+       * An already-paid response must not blindly accept an unrelated payment ID.
+       */
+      if (order.paymentStatus === "PAID") {
+        if (
+          order.razorpayPaymentId &&
+          order.razorpayPaymentId !== razorpayPaymentId
+        ) {
+          return res.status(400).json({
+            message:
+              "Payment ID does not match the payment confirmed for this order",
+          });
+        }
+
+        return res.json({
+          message: "Payment already verified",
+          orderId: order.id,
+          paymentStatus: order.paymentStatus,
+          status: order.status,
+        });
+      }
+
+      if (order.status !== "PENDING") {
+        return res.status(400).json({
+          message: "This order is no longer pending",
+        });
+      }
+
+      if (order.paymentStatus !== "PENDING") {
+        return res.status(400).json({
+          message: "Payment has already been processed",
+        });
+      }
+
       const razorpay = getRazorpayClient();
 
       if (!razorpay) {
@@ -341,7 +363,7 @@ router.post(
       const razorpayOrder =
         await razorpay.orders.fetch(razorpayOrderId);
 
-      const expectedAmount = order.total * 100;
+      expectedAmount = order.total * 100;
 
       if (
         razorpayOrder.amount !== expectedAmount ||
@@ -410,6 +432,12 @@ router.post(
 
         // Another process may have confirmed payment first.
         if (currentOrder.paymentStatus === "PAID") {
+          if (
+            currentOrder.razorpayPaymentId &&
+            currentOrder.razorpayPaymentId !== razorpayPaymentId
+          ) {
+            throw new Error("PAYMENT_ID_MISMATCH");
+          }
           return {
             order: currentOrder,
             paymentConfirmedByThisRequest: false,
@@ -455,6 +483,12 @@ router.post(
           });
 
           if (latestOrder?.paymentStatus === "PAID") {
+            if (
+              latestOrder.razorpayPaymentId &&
+              latestOrder.razorpayPaymentId !== razorpayPaymentId
+            ) {
+              throw new Error("PAYMENT_ID_MISMATCH");
+            }
             return {
               order: latestOrder,
               paymentConfirmedByThisRequest: false,
@@ -535,6 +569,16 @@ router.post(
     } catch (error) {
       if (
         error instanceof Error &&
+        error.message === "PAYMENT_ID_MISMATCH"
+      ) {
+        return res.status(400).json({
+          message:
+            "Payment ID does not match the payment confirmed for this order",
+        });
+      }
+
+      if (
+        error instanceof Error &&
         error.message === "ORDER_NOT_PENDING"
       ) {
         return res.status(400).json({
@@ -543,13 +587,26 @@ router.post(
       }
 
       // Handle expired or unavailable stock reservation.
+      // Payment has been captured, but reservation expired: automatically initiate refund!
       if (
         error instanceof Error &&
         error.message === "RESERVATION_EXPIRED_OR_UNAVAILABLE"
       ) {
+        try {
+          await processLateCaptureRefund({
+            orderId: parsedOrderId,
+            paymentId: razorpayPaymentId,
+            amountPaise: expectedAmount,
+          });
+        } catch (refundError) {
+          console.error("Failed to initiate late capture refund:", refundError);
+        }
+
         return res.status(409).json({
           message:
-            "Your stock reservation has expired. Payment reconciliation is required.",
+            "Your stock reservation has expired. Your payment has been received and an automatic refund has been initiated.",
+          orderId: parsedOrderId,
+          refundInitiated: true,
         });
       }
 

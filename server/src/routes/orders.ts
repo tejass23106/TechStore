@@ -12,6 +12,7 @@ type AuthenticatedRequest,
 } from "../Middleware/auth.js";
 
 import { sendOrderConfirmationEmail } from "../lib/email.js";
+import { releaseExpiredStockReservations } from "../lib/stockReservations.js";
 
 const router = Router();
 
@@ -321,5 +322,60 @@ const order = await prisma.$transaction(async (tx) => {
   }
   }
   );
+
+/**
+ * POST /api/orders/release-expired
+ * Protected endpoint for releasing expired stock reservations.
+ * Requires admin authentication or CRON_SECRET header.
+ */
+router.post("/release-expired", async (req, res) => {
+  try {
+    const cronSecret = process.env.CRON_SECRET;
+    const headerSecret =
+      req.header("x-cron-secret") ||
+      req.header("authorization")?.replace(/^Bearer\s+/i, "");
+
+    let isAuthorized = Boolean(
+      cronSecret && headerSecret && cronSecret === headerSecret
+    );
+
+    if (!isAuthorized) {
+      const sessionId = req.cookies?.techstore_session;
+      if (sessionId) {
+        const session = await prisma.session.findUnique({
+          where: { id: sessionId },
+          include: { user: true },
+        });
+
+        if (
+          session &&
+          session.expiresAt >= new Date() &&
+          session.user.role === "ADMIN"
+        ) {
+          isAuthorized = true;
+        }
+      }
+    }
+
+    if (!isAuthorized) {
+      return res.status(401).json({
+        message: "Unauthorized to release expired reservations",
+      });
+    }
+
+    const result = await releaseExpiredStockReservations();
+
+    return res.json({
+      message: "Expired stock reservations released successfully",
+      ...result,
+    });
+  } catch (error) {
+    console.error("Release expired reservations error:", error);
+
+    return res.status(500).json({
+      message: "Failed to release expired reservations",
+    });
+  }
+});
 
 export default router;

@@ -299,6 +299,14 @@ export default function Checkout() {
     } catch (error) {
       console.error("Payment error:", error);
 
+      if (
+        error instanceof Error &&
+        (error.message.toLowerCase().includes("expired") ||
+          error.message.toLowerCase().includes("reservation"))
+      ) {
+        setOrderId(null);
+      }
+
       setError(
         error instanceof Error
           ? error.message
@@ -396,6 +404,14 @@ export default function Checkout() {
       await startPayment(order);
     } catch (error) {
       console.error("Checkout error:", error);
+
+      if (
+        error instanceof Error &&
+        (error.message.toLowerCase().includes("expired") ||
+          error.message.toLowerCase().includes("reservation"))
+      ) {
+        setOrderId(null);
+      }
 
       setError(
         error instanceof Error

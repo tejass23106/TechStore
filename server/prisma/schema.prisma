@@ -203,6 +203,17 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum RefundStatus {
+  PENDING
+  SUBMITTED
+  PROCESSED
+  FAILED
+}
+
+enum RefundReason {
+  LATE_CAPTURE
+}
+
 model Order {
   id                   Int           @id @default(autoincrement())
   userId               Int
@@ -223,9 +234,10 @@ model Order {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  address Address?    @relation(fields: [addressId], references: [id], onDelete: SetNull)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  address Address?      @relation(fields: [addressId], references: [id], onDelete: SetNull)
   items   OrderItem[]
+  refunds OrderRefund[]
 
   @@index([userId])
   @@index([status])
@@ -272,4 +284,25 @@ model RazorpayWebhookEvent {
   receivedAt  DateTime  @default(now())
 
   @@index([processed])
+}
+
+model OrderRefund {
+  id               Int          @id @default(autoincrement())
+  orderId          Int
+  paymentId        String
+  razorpayRefundId String?      @unique
+  idempotencyKey   String       @unique
+  amountPaise      Int
+  reason           RefundReason
+  status           RefundStatus @default(PENDING)
+  errorMessage     String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  processedAt DateTime?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@unique([orderId, paymentId, reason])
+  @@index([status])
 }

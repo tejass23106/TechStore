@@ -5,18 +5,29 @@ import { GoogleGenAI } from "@google/genai";
 
 const router = Router();
 
-const apiKey = process.env.GEMINI_API_KEY;
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
 
-if (!apiKey) {
-  throw new Error("GEMINI_API_KEY is not defined");
+  if (!apiKey) {
+    return null;
+  }
+
+  return new GoogleGenAI({
+    apiKey,
+  });
 }
-
-const ai = new GoogleGenAI({
-  apiKey,
-});
 
 router.post("/recommendations", requirePro, async (req, res) => {
   try {
+    const ai = getGeminiClient();
+
+    if (!ai) {
+      return res.status(503).json({
+        message:
+          "TechStore Pro AI is currently unavailable because the AI service is not configured.",
+      });
+    }
+
     const { query, budget } = req.body;
 
     if (typeof query !== "string" || !query.trim()) {
@@ -58,14 +69,14 @@ router.post("/recommendations", requirePro, async (req, res) => {
         price: true,
         stock: true,
         rating: true,
-        reviewCount: true,
+        reviews: true,
       },
       orderBy: [
         {
           rating: "desc",
         },
         {
-          reviewCount: "desc",
+          reviews: "desc",
         },
       ],
       take: 20,
@@ -87,7 +98,7 @@ router.post("/recommendations", requirePro, async (req, res) => {
       price: Number(product.price),
       stock: product.stock,
       rating: product.rating,
-      reviewCount: product.reviewCount,
+      reviewCount: product.reviews,
     }));
 
     const prompt =

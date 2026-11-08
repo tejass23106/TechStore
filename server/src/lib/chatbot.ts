@@ -13,15 +13,17 @@ import {
   clearCart,
 } from "../chatbot/tools.js";
 
-const apiKey = process.env.GEMINI_API_KEY;
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
 
-if (!apiKey) {
-  throw new Error("GEMINI_API_KEY is not defined");
+  if (!apiKey) {
+    return null;
+  }
+
+  return new GoogleGenAI({
+    apiKey,
+  });
 }
-
-const ai = new GoogleGenAI({
-  apiKey,
-});
 
 const GEMINI_MODEL = "gemini-3.6-flash";
 
@@ -612,6 +614,12 @@ export async function generateChatbotResponse(
    *
    * Product catalog retrieval is no longer dependent on this section.
    */
+
+  const ai = getGeminiClient();
+
+  if (!ai) {
+    return "The AI shopping assistant is temporarily unavailable because the AI service is not configured.";
+  }
 
   const chatbotStart = performance.now();
 
