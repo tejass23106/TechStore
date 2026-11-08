@@ -7,9 +7,9 @@ import {
 
 import { Link, Navigate } from "react-router-dom";
 
-import { useAuth } from "../context/AuthContext";
-import { useCart } from "../context/CartContext";
-import { useWishlist } from "../context/WishlistContext";
+import { useAuth } from "../context/useAuth";
+import { useCart } from "../context/useCart";
+import { useWishlist } from "../context/useWishlist";
 
 export default function Wishlist() {
   const { user, loading: authLoading } = useAuth();

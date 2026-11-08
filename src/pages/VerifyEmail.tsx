@@ -17,68 +17,74 @@ type VerificationState =
 
 export default function VerifyEmail() {
   const [searchParams] = useSearchParams();
+const token = searchParams.get("token");
 
-  const [status, setStatus] =
-    useState<VerificationState>("verifying");
-
-  const [message, setMessage] = useState(
-    "Verifying your email address..."
+const [status, setStatus] =
+  useState<VerificationState>(
+    token ? "verifying" : "error"
   );
 
+const [message, setMessage] = useState(
+  token
+    ? "Verifying your email address..."
+    : "The email verification link is invalid or incomplete."
+);
   useEffect(() => {
-    const token = searchParams.get("token");
+  if (!token) return;
 
-    if (!token) {
-      setStatus("error");
-      setMessage(
-        "The email verification link is invalid or incomplete."
-      );
-      return;
-    }
+  let cancelled = false;
 
-    const verifyEmail = async () => {
-      try {
-        const response = await fetch(
-          `${API_URL}/auth/verify-email?token=${encodeURIComponent(
-            token
-          )}`,
-          {
-            method: "GET",
-            credentials: "include",
-          }
-        );
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(
-            data.message ||
-              "Unable to verify your email."
-          );
+  const verifyEmail = async () => {
+    try {
+      const response = await fetch(
+        `${API_URL}/auth/verify-email?token=${encodeURIComponent(
+          token
+        )}`,
+        {
+          method: "GET",
+          credentials: "include",
         }
+      );
 
-        setStatus("success");
-        setMessage(
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
           data.message ||
-            "Your email has been verified successfully."
-        );
-      } catch (error) {
-        console.error(
-          "Email verification error:",
-          error
-        );
-
-        setStatus("error");
-        setMessage(
-          error instanceof Error
-            ? error.message
-            : "Unable to verify your email."
+            "Unable to verify your email."
         );
       }
-    };
 
-    verifyEmail();
-  }, [searchParams]);
+      if (cancelled) return;
+
+      setStatus("success");
+      setMessage(
+        data.message ||
+          "Your email has been verified successfully."
+      );
+    } catch (error) {
+      if (cancelled) return;
+
+      console.error(
+        "Email verification error:",
+        error
+      );
+
+      setStatus("error");
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to verify your email."
+      );
+    }
+  };
+
+  void verifyEmail();
+
+  return () => {
+    cancelled = true;
+  };
+}, [token]);
 
   return (
     <div className="min-h-[calc(100vh-160px)] flex items-center justify-center px-4 py-16">

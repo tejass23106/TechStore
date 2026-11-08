@@ -1,12 +1,16 @@
 import {
-  createContext,
-  useContext,
   useEffect,
   useState,
   type ReactNode,
 } from "react";
 
-import { useAuth } from "./AuthContext";
+import {
+  WishlistContext,
+  type WishlistItem,
+  type WishlistProduct,
+} from "./WishlistContextStore";
+
+import { useAuth } from "./useAuth";
 
 import {
   addWishlistItem,
@@ -15,34 +19,11 @@ import {
   type ApiWishlistItem,
 } from "../lib/api";
 
-export type WishlistProduct = {
-  id: number;
-  name: string;
-  price: number;
-  category: string;
-  rating: number;
-  reviews: number;
-  stock: number;
-  image: string;
-  description: string;
-};
 
-export type WishlistItem = WishlistProduct & {
-  wishlistItemId: number;
-  createdAt: string;
-};
 
-type WishlistContextType = {
-  items: WishlistItem[];
-  loading: boolean;
-  isInWishlist: (productId: number) => boolean;
-  addToWishlist: (product: WishlistProduct) => Promise<void>;
-  removeFromWishlist: (productId: number) => Promise<void>;
-  toggleWishlist: (product: WishlistProduct) => Promise<void>;
-};
 
-const WishlistContext =
-  createContext<WishlistContextType | null>(null);
+
+
 
 function convertApiWishlist(
   wishlistItems: ApiWishlistItem[]
@@ -192,14 +173,3 @@ export function WishlistProvider({
   );
 }
 
-export function useWishlist() {
-  const context = useContext(WishlistContext);
-
-  if (!context) {
-    throw new Error(
-      "useWishlist must be used inside WishlistProvider"
-    );
-  }
-
-  return context;
-}

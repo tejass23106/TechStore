@@ -1,12 +1,16 @@
 import {
-  createContext,
-  useContext,
   useEffect,
   useState,
   type ReactNode,
 } from "react";
 
-import { useAuth } from "./AuthContext";
+import {
+  CartContext,
+  type CartItem,
+  type Product,
+} from "./CartContextStore";
+
+import { useAuth } from "./useAuth";
 
 import {
   addCartItem,
@@ -17,36 +21,11 @@ import {
   type ApiCart,
 } from "../lib/api";
 
-export type Product = {
-  id: number;
-  name: string;
-  price: number;
-  category: string;
-  rating: number;
-  reviews: number;
-  stock: number;
-  image: string;
-  description: string;
-};
 
-export type CartItem = Product & {
-  quantity: number;
-};
 
-type CartContextType = {
-  items: CartItem[];
-  totalItems: number;
-  subtotal: number;
-  loading: boolean;
-  addToCart: (product: Product) => Promise<void>;
-  increaseQuantity: (id: number) => Promise<void>;
-  decreaseQuantity: (id: number) => Promise<void>;
-  removeFromCart: (id: number) => Promise<void>;
-  clearCart: () => Promise<void>;
-};
 
-const CartContext =
-  createContext<CartContextType | null>(null);
+
+
 
 const STORAGE_KEY = "techstore-cart";
 
@@ -407,15 +386,5 @@ export function CartProvider({
   );
 }
 
-export function useCart() {
-  const context = useContext(CartContext);
 
-  if (!context) {
-    throw new Error(
-      "useCart must be used inside CartProvider"
-    );
-  }
-
-  return context;
-}
 

@@ -11,9 +11,9 @@ import {
 
 import { useState } from "react";
 
-import { useCart } from "../context/CartContext";
+import { useCart } from "../context/useCart";
 
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 
 const navigation = [
   { name: "Home", path: "/" },

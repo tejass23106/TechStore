@@ -893,4 +893,5 @@ export async function generateChatbotResponse(
   }
 
   return "I found the information, but I could not generate a response.";
+  
 }

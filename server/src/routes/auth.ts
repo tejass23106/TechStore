@@ -2,6 +2,7 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { validate } from "../Middleware/validate.js";
+import type { Response } from "express";
 import {
 registerSchema,
 loginSchema,
@@ -20,35 +21,35 @@ const router = Router();
 const SESSION_DURATION_DAYS = 7;
 
 function createSessionId() {
-return crypto.randomBytes(32).toString("hex");
+  return crypto.randomBytes(32).toString("hex");
 }
 
 function getSessionExpiry() {
-const expiresAt = new Date();
+  const expiresAt = new Date();
 
-expiresAt.setDate(
-expiresAt.getDate() + SESSION_DURATION_DAYS
-);
+  expiresAt.setDate(
+    expiresAt.getDate() + SESSION_DURATION_DAYS
+  );
 
-return expiresAt;
+  return expiresAt;
 }
 
 function setSessionCookie(
-res: any,
-sessionId: string
+  res: Response,
+  sessionId: string
 ) {
-res.cookie("techstore_session", sessionId, {
-httpOnly: true,
-secure: process.env.NODE_ENV === "production",
-sameSite: "none",
-maxAge:
-SESSION_DURATION_DAYS *
-24 *
-60 *
-60 *
-1000,
-path: "/",
-});
+  res.cookie("techstore_session", sessionId, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "none",
+    maxAge:
+      SESSION_DURATION_DAYS *
+      24 *
+      60 *
+      60 *
+      1000,
+    path: "/",
+  });
 }
 
 /*

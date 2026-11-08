@@ -20,9 +20,9 @@ import {
   type ApiReview,
 } from "../lib/api";
 
-import { useCart } from "../context/CartContext";
-import { useAuth } from "../context/AuthContext";
-import { useWishlist } from "../context/WishlistContext";
+import { useCart } from "../context/useCart";
+import { useAuth } from "../context/useAuth";
+import { useWishlist } from "../context/useWishlist";
 
 import type { Product } from "../data/products";
 
@@ -67,22 +67,29 @@ export default function ProductDetails() {
 
   // Load product
   useEffect(() => {
-    if (!id) {
-      setError("Invalid product.");
-      setLoading(false);
-      return;
-    }
+    if (!id) return;
+
+    let cancelled = false;
 
     getProduct(id)
       .then((data) => {
+        if (cancelled) return;
+
         setProduct(data);
         setLoading(false);
+        setError("");
       })
       .catch((err) => {
+        if (cancelled) return;
+
         console.error(err);
         setError("Product not found.");
         setLoading(false);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
 
   // Load reviews
@@ -147,7 +154,7 @@ export default function ProductDetails() {
     loadReviews();
   }, [product, user]);
 
-  if (loading) {
+  if (loading && id) {
     return (
       <main className="flex min-h-[70vh] items-center justify-center px-6">
         <p className="text-gray-500">
@@ -157,7 +164,7 @@ export default function ProductDetails() {
     );
   }
 
-  if (error || !product) {
+  if (!id || error || !product) {
     return (
       <main className="flex min-h-[70vh] items-center justify-center px-6">
         <div className="text-center">
@@ -166,7 +173,7 @@ export default function ProductDetails() {
           </h1>
 
           <p className="mt-3 text-gray-500">
-            {error}
+            {!id ? "Invalid product." : error}
           </p>
 
           <Link
@@ -203,11 +210,11 @@ export default function ProductDetails() {
   }
 
   async function handleWishlist() {
-  if (!user || !product) {
-    return;
-  }
+    if (!user || !product) {
+      return;
+    }
 
-  try {
+    try {
       setWishlistLoading(true);
 
       await toggleWishlist(product);
@@ -256,8 +263,8 @@ export default function ProductDetails() {
     setProduct(updatedProduct);
   }
 
- async function handleSubmitReview() {
-  if (!user || !product) return;
+  async function handleSubmitReview() {
+    if (!user || !product) return;
 
     if (comment.length > 1000) {
       setReviewError(
@@ -496,13 +503,13 @@ export default function ProductDetails() {
 
               {product.originalPrice >
                 product.price && (
-                <p className="text-lg text-gray-400 line-through">
-                  ₹
-                  {product.originalPrice.toLocaleString(
-                    "en-IN"
-                  )}
-                </p>
-              )}
+                  <p className="text-lg text-gray-400 line-through">
+                    ₹
+                    {product.originalPrice.toLocaleString(
+                      "en-IN"
+                    )}
+                  </p>
+                )}
             </div>
 
             <p className="mt-6 max-w-xl leading-8 text-gray-500">
@@ -522,13 +529,12 @@ export default function ProductDetails() {
             <button
               onClick={handleAddToCart}
               disabled={product.stock <= 0}
-              className={`mt-8 flex w-full items-center justify-center gap-3 rounded-full px-7 py-4 font-semibold text-white transition ${
-                product.stock <= 0
-                  ? "cursor-not-allowed bg-gray-400"
-                  : added
-                    ? "bg-green-600"
-                    : "bg-black hover:bg-gray-800"
-              }`}
+              className={`mt-8 flex w-full items-center justify-center gap-3 rounded-full px-7 py-4 font-semibold text-white transition ${product.stock <= 0
+                ? "cursor-not-allowed bg-gray-400"
+                : added
+                  ? "bg-green-600"
+                  : "bg-black hover:bg-gray-800"
+                }`}
             >
               <ShoppingCart size={20} />
 
@@ -689,13 +695,13 @@ export default function ProductDetails() {
                               size={30}
                               fill={
                                 star <=
-                                selectedRating
+                                  selectedRating
                                   ? "currentColor"
                                   : "none"
                               }
                               className={
                                 star <=
-                                selectedRating
+                                  selectedRating
                                   ? "text-yellow-500"
                                   : "text-gray-300"
                               }

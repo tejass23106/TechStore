@@ -77,7 +77,7 @@ export default function Chatbot() {
       if (!response.ok) {
         throw new Error(
           data.message ||
-            "Unable to contact the TechStore AI assistant."
+          "Unable to contact the TechStore AI assistant."
         );
       }
 
@@ -118,7 +118,7 @@ export default function Chatbot() {
     }
   }
 
-  function useExample(example: string) {
+  function fillExample(example: string) {
     const cleanExample = example
       .replace(/^Try:\s*/, "")
       .replace(/^"|"$/g, "");
@@ -167,18 +167,16 @@ export default function Chatbot() {
             {messages.map((item, index) => (
               <div
                 key={index}
-                className={`flex ${
-                  item.role === "user"
-                    ? "justify-end"
-                    : "justify-start"
-                }`}
+                className={`flex ${item.role === "user"
+                  ? "justify-end"
+                  : "justify-start"
+                  }`}
               >
                 <div
-                  className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm ${
-                    item.role === "user"
-                      ? "rounded-br-md bg-black text-white"
-                      : "rounded-bl-md bg-white text-gray-800 shadow-sm"
-                  }`}
+                  className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm ${item.role === "user"
+                    ? "rounded-br-md bg-black text-white"
+                    : "rounded-bl-md bg-white text-gray-800 shadow-sm"
+                    }`}
                 >
                   {item.role === "bot" ? (
                     <ReactMarkdown
@@ -257,7 +255,7 @@ export default function Chatbot() {
             <button
               type="button"
               onClick={() =>
-                useExample(chatbotExamples[exampleIndex])
+                fillExample(chatbotExamples[exampleIndex])
               }
               className="mb-2 block w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-left text-xs text-gray-600 transition hover:border-gray-400 hover:bg-gray-100"
             >

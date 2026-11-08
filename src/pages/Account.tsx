@@ -9,7 +9,7 @@ import {
   Sparkles,
   User,
 } from "lucide-react";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 
 const API_URL =
   import.meta.env.VITE_API_URL || "http://localhost:5000/api";
@@ -59,12 +59,8 @@ export default function Account() {
   const [proError, setProError] = useState("");
   const [proRecommendations, setProRecommendations] =
     useState("");
-
-  const loadSubscriptionStatus = async () => {
-    try {
-      setSubscriptionLoading(true);
-      setSubscriptionError("");
-
+  const fetchSubscriptionStatus =
+    async (): Promise<SubscriptionStatus> => {
       const response = await fetch(
         `${API_URL}/subscription/status`,
         {
@@ -77,33 +73,50 @@ export default function Account() {
       if (!response.ok) {
         throw new Error(
           data.message ||
-            "Failed to load subscription status"
+          "Failed to load subscription status"
         );
       }
 
-      setSubscription(data);
-    } catch (error) {
-      console.error(
-        "Subscription status error:",
-        error
-      );
+      return data;
+    };
 
-      setSubscriptionError(
-        error instanceof Error
-          ? error.message
-          : "Failed to load subscription status"
-      );
-    } finally {
-      setSubscriptionLoading(false);
-    }
-  };
+
 
   useEffect(() => {
-    if (user) {
-      loadSubscriptionStatus();
-    } else {
-      setSubscriptionLoading(false);
-    }
+    if (!user) return;
+
+    let cancelled = false;
+
+    fetchSubscriptionStatus()
+      .then((data) => {
+        if (cancelled) return;
+
+        setSubscriptionError("");
+        setSubscription(data);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+
+        console.error(
+          "Subscription status error:",
+          error
+        );
+
+        setSubscriptionError(
+          error instanceof Error
+            ? error.message
+            : "Failed to load subscription status"
+        );
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setSubscriptionLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [user]);
 
   const loadRazorpayScript = (): Promise<boolean> => {
@@ -176,7 +189,7 @@ export default function Account() {
       if (!response.ok) {
         throw new Error(
           data.message ||
-            "Failed to create Pro subscription"
+          "Failed to create Pro subscription"
         );
       }
 
@@ -198,7 +211,7 @@ export default function Account() {
         theme: {
           color: "#111827",
         },
-        handler: async (_response) => {
+        handler: async () => {
           try {
             setCheckoutLoading(true);
             setSubscriptionError("");
@@ -214,7 +227,11 @@ export default function Account() {
               setTimeout(resolve, 2000)
             );
 
-            await loadSubscriptionStatus();
+            const subscriptionData =
+              await fetchSubscriptionStatus();
+
+            setSubscription(subscriptionData);
+            setSubscriptionError("");
           } catch (error) {
             console.error(
               "Subscription refresh error:",
@@ -279,8 +296,8 @@ export default function Account() {
             query: proQuery.trim(),
             ...(proBudget.trim()
               ? {
-                  budget: Number(proBudget),
-                }
+                budget: Number(proBudget),
+              }
               : {}),
           }),
         }
@@ -288,8 +305,8 @@ export default function Account() {
 
       const data =
         (await response.json()) as
-          | ProRecommendationResponse
-          | { message?: string };
+        | ProRecommendationResponse
+        | { message?: string };
 
       if (!response.ok) {
         throw new Error(
@@ -451,230 +468,230 @@ export default function Account() {
             </section>
 
             ```
-        {/* Subscription */}
-        <section className="overflow-hidden rounded-3xl border border-gray-200">
-          <div className="bg-black p-7 text-white">
-            <div className="flex items-start justify-between gap-5">
-              <div className="flex items-center gap-4">
-                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/10">
-                  <Crown size={23} />
-                </div>
+            {/* Subscription */}
+            <section className="overflow-hidden rounded-3xl border border-gray-200">
+              <div className="bg-black p-7 text-white">
+                <div className="flex items-start justify-between gap-5">
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/10">
+                      <Crown size={23} />
+                    </div>
 
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-xl font-bold">
-                      TechStore Pro
-                    </h2>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-xl font-bold">
+                          TechStore Pro
+                        </h2>
 
-                    <span className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-black">
-                      {subscriptionLoading ? "..." : subscription?.isPro ? "PRO" : "FREE"}
-                    </span>
+                        <span className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-black">
+                          {subscriptionLoading ? "..." : subscription?.isPro ? "PRO" : "FREE"}
+                        </span>
+                      </div>
+
+                      <p className="mt-1 text-sm text-gray-300">
+                        Premium shopping features for smarter product discovery.
+                      </p>
+                    </div>
                   </div>
-
-                  <p className="mt-1 text-sm text-gray-300">
-                    Premium shopping features for smarter product discovery.
-                  </p>
                 </div>
               </div>
-            </div>
-          </div>
 
-          {subscriptionLoading ? (
-            <div className="p-7">
-              <div className="rounded-2xl bg-gray-50 p-5">
-                <p className="text-sm text-gray-500">
-                  Checking your subscription...
-                </p>
-              </div>
-            </div>
-          ) : subscription?.isPro ? (
-            <div className="p-7">
-              <div className="rounded-2xl bg-green-50 p-5">
-                <div className="flex items-center gap-3">
-                  <CheckCircle
-                    size={20}
-                    className="text-green-600"
-                  />
-
-                  <div>
-                    <p className="font-bold text-green-700">
-                      You are a Pro member
-                    </p>
-
-                    <p className="mt-1 text-sm text-green-700">
-                      Your TechStore Pro subscription is active.
+              {subscriptionLoading ? (
+                <div className="p-7">
+                  <div className="rounded-2xl bg-gray-50 p-5">
+                    <p className="text-sm text-gray-500">
+                      Checking your subscription...
                     </p>
                   </div>
                 </div>
-
-                {subscription.endDate && (
-                  <p className="mt-4 text-sm text-green-700">
-                    Current period ends on{" "}
-                    {new Date(
-                      subscription.endDate
-                    ).toLocaleDateString("en-IN")}
-                    .
-                  </p>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="p-7">
-              <div className="grid gap-8 lg:grid-cols-[1fr_auto] lg:items-center">
-                <div>
-                  <p className="text-2xl font-black tracking-tight">
-                    Upgrade your shopping experience
-                  </p>
-
-                  <p className="mt-3 max-w-2xl text-sm leading-6 text-gray-500">
-                    Get premium AI-powered product assistance designed to
-                    help you find the right products faster.
-                  </p>
-
-                  <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                    <div className="flex items-start gap-3">
+              ) : subscription?.isPro ? (
+                <div className="p-7">
+                  <div className="rounded-2xl bg-green-50 p-5">
+                    <div className="flex items-center gap-3">
                       <CheckCircle
-                        size={18}
-                        className="mt-0.5 shrink-0 text-green-600"
+                        size={20}
+                        className="text-green-600"
                       />
+
                       <div>
-                        <p className="text-sm font-semibold">
-                          Pro AI Product Recommendations
+                        <p className="font-bold text-green-700">
+                          You are a Pro member
                         </p>
-                        <p className="mt-1 text-xs leading-5 text-gray-500">
-                          Get AI-powered recommendations based on what you
-                          need.
+
+                        <p className="mt-1 text-sm text-green-700">
+                          Your TechStore Pro subscription is active.
                         </p>
                       </div>
                     </div>
 
-                    <div className="flex items-start gap-3">
-                      <CheckCircle
-                        size={18}
-                        className="mt-0.5 shrink-0 text-green-600"
-                      />
-                      <div>
-                        <p className="text-sm font-semibold">
-                          Budget-Based Recommendations
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-gray-500">
-                          Set your budget and find suitable products from
-                          the TechStore catalog.
-                        </p>
+                    {subscription.endDate && (
+                      <p className="mt-4 text-sm text-green-700">
+                        Current period ends on{" "}
+                        {new Date(
+                          subscription.endDate
+                        ).toLocaleDateString("en-IN")}
+                        .
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="p-7">
+                  <div className="grid gap-8 lg:grid-cols-[1fr_auto] lg:items-center">
+                    <div>
+                      <p className="text-2xl font-black tracking-tight">
+                        Upgrade your shopping experience
+                      </p>
+
+                      <p className="mt-3 max-w-2xl text-sm leading-6 text-gray-500">
+                        Get premium AI-powered product assistance designed to
+                        help you find the right products faster.
+                      </p>
+
+                      <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                        <div className="flex items-start gap-3">
+                          <CheckCircle
+                            size={18}
+                            className="mt-0.5 shrink-0 text-green-600"
+                          />
+                          <div>
+                            <p className="text-sm font-semibold">
+                              Pro AI Product Recommendations
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-gray-500">
+                              Get AI-powered recommendations based on what you
+                              need.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-3">
+                          <CheckCircle
+                            size={18}
+                            className="mt-0.5 shrink-0 text-green-600"
+                          />
+                          <div>
+                            <p className="text-sm font-semibold">
+                              Budget-Based Recommendations
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-gray-500">
+                              Set your budget and find suitable products from
+                              the TechStore catalog.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-3">
+                          <CheckCircle
+                            size={18}
+                            className="mt-0.5 shrink-0 text-green-600"
+                          />
+                          <div>
+                            <p className="text-sm font-semibold">
+                              Personalized Shopping Guidance
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-gray-500">
+                              Describe what you're looking for and receive
+                              tailored product guidance.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-3">
+                          <CheckCircle
+                            size={18}
+                            className="mt-0.5 shrink-0 text-green-600"
+                          />
+                          <div>
+                            <p className="text-sm font-semibold">
+                              AI Product Comparison Help
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-gray-500">
+                              Understand product choices and trade-offs more
+                              easily.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-3">
+                          <CheckCircle
+                            size={18}
+                            className="mt-0.5 shrink-0 text-green-600"
+                          />
+                          <div>
+                            <p className="text-sm font-semibold">
+                              Smarter Product Discovery
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-gray-500">
+                              Find products matching your requirements faster.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-3">
+                          <CheckCircle
+                            size={18}
+                            className="mt-0.5 shrink-0 text-green-600"
+                          />
+                          <div>
+                            <p className="text-sm font-semibold">
+                              Premium AI Access
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-gray-500">
+                              Access TechStore's premium AI recommendation
+                              feature.
+                            </p>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
-                    <div className="flex items-start gap-3">
-                      <CheckCircle
-                        size={18}
-                        className="mt-0.5 shrink-0 text-green-600"
-                      />
-                      <div>
-                        <p className="text-sm font-semibold">
-                          Personalized Shopping Guidance
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-gray-500">
-                          Describe what you're looking for and receive
-                          tailored product guidance.
-                        </p>
-                      </div>
-                    </div>
+                    <div className="rounded-3xl border border-gray-200 p-6 lg:min-w-[230px]">
+                      <p className="text-sm font-semibold text-gray-500">
+                        TechStore Pro
+                      </p>
 
-                    <div className="flex items-start gap-3">
-                      <CheckCircle
-                        size={18}
-                        className="mt-0.5 shrink-0 text-green-600"
-                      />
-                      <div>
-                        <p className="text-sm font-semibold">
-                          AI Product Comparison Help
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-gray-500">
-                          Understand product choices and trade-offs more
-                          easily.
-                        </p>
-                      </div>
-                    </div>
+                      <div className="mt-2 flex items-end gap-1">
+                        <span className="text-4xl font-black">
+                          ₹199
+                        </span>
 
-                    <div className="flex items-start gap-3">
-                      <CheckCircle
-                        size={18}
-                        className="mt-0.5 shrink-0 text-green-600"
-                      />
-                      <div>
-                        <p className="text-sm font-semibold">
-                          Smarter Product Discovery
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-gray-500">
-                          Find products matching your requirements faster.
-                        </p>
+                        <span className="mb-1 text-sm text-gray-500">
+                          /month
+                        </span>
                       </div>
-                    </div>
 
-                    <div className="flex items-start gap-3">
-                      <CheckCircle
-                        size={18}
-                        className="mt-0.5 shrink-0 text-green-600"
-                      />
-                      <div>
-                        <p className="text-sm font-semibold">
-                          Premium AI Access
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-gray-500">
-                          Access TechStore's premium AI recommendation
-                          feature.
-                        </p>
-                      </div>
+                      <p className="mt-2 text-xs leading-5 text-gray-500">
+                        Monthly recurring subscription.
+                      </p>
+
+                      <button
+                        type="button"
+                        onClick={handleUpgradeToPro}
+                        disabled={checkoutLoading}
+                        className="mt-5 flex w-full items-center justify-center gap-2 rounded-full bg-black px-5 py-3.5 text-sm font-semibold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <Crown size={16} />
+
+                        {checkoutLoading
+                          ? "Opening checkout..."
+                          : "Upgrade to Pro"}
+                      </button>
+
+                      <p className="mt-3 text-center text-xs text-gray-400">
+                        Secure payment through Razorpay
+                      </p>
                     </div>
                   </div>
                 </div>
+              )}
 
-                <div className="rounded-3xl border border-gray-200 p-6 lg:min-w-[230px]">
-                  <p className="text-sm font-semibold text-gray-500">
-                    TechStore Pro
-                  </p>
-
-                  <div className="mt-2 flex items-end gap-1">
-                    <span className="text-4xl font-black">
-                      ₹199
-                    </span>
-
-                    <span className="mb-1 text-sm text-gray-500">
-                      /month
-                    </span>
-                  </div>
-
-                  <p className="mt-2 text-xs leading-5 text-gray-500">
-                    Monthly recurring subscription.
-                  </p>
-
-                  <button
-                    type="button"
-                    onClick={handleUpgradeToPro}
-                    disabled={checkoutLoading}
-                    className="mt-5 flex w-full items-center justify-center gap-2 rounded-full bg-black px-5 py-3.5 text-sm font-semibold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    <Crown size={16} />
-
-                    {checkoutLoading
-                      ? "Opening checkout..."
-                      : "Upgrade to Pro"}
-                  </button>
-
-                  <p className="mt-3 text-center text-xs text-gray-400">
-                    Secure payment through Razorpay
-                  </p>
+              {subscriptionError && (
+                <div className="mx-7 mb-7 rounded-2xl bg-red-50 p-4 text-sm font-medium text-red-700">
+                  {subscriptionError}
                 </div>
-              </div>
-            </div>
-          )}
-
-          {subscriptionError && (
-            <div className="mx-7 mb-7 rounded-2xl bg-red-50 p-4 text-sm font-medium text-red-700">
-              {subscriptionError}
-            </div>
-          )}
-        </section>
+              )}
+            </section>
 
 
             {/* Pro AI Recommendations */}

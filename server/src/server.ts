@@ -28,22 +28,22 @@ app.use(helmet());
 const PORT = process.env.PORT || 5000;
 
 const FRONTEND_URL =
-process.env.FRONTEND_URL || "http://localhost:5173";
+  process.env.FRONTEND_URL || "http://localhost:5173";
 
 app.use(
-cors({
-origin: FRONTEND_URL,
-credentials: true,
-})
+  cors({
+    origin: FRONTEND_URL,
+    credentials: true,
+  })
 );
 
 app.use(
-"/api/payments/webhook",
-express.raw({
-type: "application/json",
-limit: "1mb",
-}),
-razorpayWebhookRouter
+  "/api/payments/webhook",
+  express.raw({
+    type: "application/json",
+    limit: "1mb",
+  }),
+  razorpayWebhookRouter
 );
 // CSRF/origin protection for browser state-changing requests.
 // Razorpay webhook is excluded because it uses signature verification.
@@ -74,15 +74,15 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.get("/", (_req, res) => {
-res.json({
-message: "TechStore API is running",
-});
+  res.json({
+    message: "TechStore API is running",
+  });
 });
 
 app.get("/api/health", (_req, res) => {
-res.json({
-status: "ok",
-});
+  res.json({
+    status: "ok",
+  });
 });
 
 app.use("/api/products", productsRouter);
@@ -99,43 +99,42 @@ app.use("/api/pro", proFeaturesRouter);
 
 // Handle unknown routes with a clean JSON response
 app.use((_req: Request, res: Response) => {
-return res.status(404).json({
-message: "Route not found",
-});
+  return res.status(404).json({
+    message: "Route not found",
+  });
 });
 
 // Global error handler
 app.use(
-(
-err: unknown,
-_req: Request,
-res: Response,
-_next: NextFunction
-) => {
-if (
-err &&
-typeof err === "object" &&
-"type" in err &&
-err.type === "entity.parse.failed"
-) {
-return res.status(400).json({
-message: "Invalid JSON request body",
-});
-}
+  (
+    err: unknown,
+    _req: Request,
+    res: Response,
+    _next: NextFunction
+  ) => {
+    void _next;
+    if (
+      err &&
+      typeof err === "object" &&
+      "type" in err &&
+      err.type === "entity.parse.failed"
+    ) {
+      return res.status(400).json({
+        message: "Invalid JSON request body",
+      });
+    }
 
+    console.error("Unhandled server error:", err);
 
-console.error("Unhandled server error:", err);
+    return res.status(500).json({
+      message: "Internal server error",
+    });
 
-return res.status(500).json({
-  message: "Internal server error",
-});
-
-
-}
+  }
 );
 
 app.listen(PORT, () => {
-console.log(
-`TechStore server running on http://localhost:${PORT}`
-);
+  console.log(
+    `TechStore server running on http://localhost:${PORT}`
+  );
 });
