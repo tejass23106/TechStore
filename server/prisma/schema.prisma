@@ -204,11 +204,13 @@ enum PaymentStatus {
 }
 
 model Order {
-  id            Int           @id @default(autoincrement())
-  userId        Int
-  addressId     Int?
-  status        OrderStatus   @default(PENDING)
-  paymentStatus PaymentStatus @default(PENDING)
+  id                   Int           @id @default(autoincrement())
+  userId               Int
+  addressId            Int?
+  status               OrderStatus   @default(PENDING)
+  paymentStatus        PaymentStatus @default(PENDING)
+  stockReserved        Boolean       @default(false)
+  reservationExpiresAt DateTime?
 
   subtotal          Int
   deliveryFee       Int     @default(0)
@@ -228,6 +230,7 @@ model Order {
   @@index([userId])
   @@index([status])
   @@index([paymentStatus])
+  @@index([stockReserved, reservationExpiresAt])
 }
 
 model OrderItem {
