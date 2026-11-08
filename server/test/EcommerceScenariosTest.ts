@@ -186,8 +186,14 @@ function processLateCaptureMock(params: {
   paymentId: string;
   amountPaise: number;
   simulateTimeout?: boolean;
-}): { success: boolean; idempotencyKey: string; status: string } {
-  const { orderId, paymentId, amountPaise, simulateTimeout } = params;
+  simulateApiFailure?: boolean;
+  simulateConflict409?: boolean;
+}): { success: boolean; idempotencyKey: string; status: string; message: string } {
+  const { orderId, paymentId, amountPaise, simulateTimeout, simulateApiFailure, simulateConflict409 } = params;
+  if (!Number.isInteger(amountPaise) || amountPaise <= 0) {
+    throw new Error(`Invalid refund amountPaise: ${amountPaise}`);
+  }
+
   const idempotencyKey = `refund_${orderId}_${paymentId}_LATE_CAPTURE`;
 
   let refundRecord = Array.from(db.refunds.values()).find(
@@ -210,12 +216,30 @@ function processLateCaptureMock(params: {
   }
 
   if (refundRecord.status === "PROCESSED") {
-    return { success: true, idempotencyKey, status: "PROCESSED" };
+    return { success: true, idempotencyKey, status: "PROCESSED", message: "Refund already processed" };
+  }
+
+  // Reset FAILED status to PENDING on retry
+  if (refundRecord.status === "FAILED") {
+    refundRecord.status = "PENDING";
+    refundRecord.errorMessage = null;
+  }
+
+  if (simulateConflict409) {
+    refundRecord.status = "SUBMITTED";
+    refundRecord.errorMessage = "In-flight 409 conflict";
+    return { success: false, idempotencyKey, status: "SUBMITTED", message: "In-flight 409 conflict" };
   }
 
   if (simulateTimeout) {
     refundRecord.errorMessage = "Network timeout";
-    return { success: false, idempotencyKey, status: "PENDING" };
+    return { success: false, idempotencyKey, status: refundRecord.status, message: "Network timeout" };
+  }
+
+  if (simulateApiFailure) {
+    refundRecord.status = "FAILED";
+    refundRecord.errorMessage = "Razorpay API error 400: Payment not eligible for refund";
+    return { success: false, idempotencyKey, status: "FAILED", message: refundRecord.errorMessage };
   }
 
   // Successful call to Razorpay
@@ -232,7 +256,7 @@ function processLateCaptureMock(params: {
     }
   }
 
-  return { success: true, idempotencyKey, status: "PROCESSED" };
+  return { success: true, idempotencyKey, status: "PROCESSED", message: "Refund processed successfully" };
 }
 
 function processRefundWebhookMock(params: {
@@ -246,6 +270,16 @@ function processRefundWebhookMock(params: {
     return { status: 400, message: "Invalid refund payload" };
   }
   if (status !== "processed") {
+    if (status === "failed") {
+      const targetRefund = Array.from(db.refunds.values()).find(
+        (r) => r.paymentId === paymentId && (r.status === "PENDING" || r.status === "SUBMITTED")
+      );
+      if (targetRefund) {
+        targetRefund.status = "FAILED";
+        targetRefund.errorMessage = "Refund failed according to webhook";
+      }
+      return { status: 200, message: "Refund failure recorded" };
+    }
     return { status: 200, message: "Refund is not processed yet" };
   }
 
@@ -257,9 +291,15 @@ function processRefundWebhookMock(params: {
     return { status: 200, message: "Refund already processed" };
   }
 
-  const order = Array.from(db.orders.values()).find(
-    (o) => o.razorpayPaymentId === paymentId
+  // Find pending/submitted/failed record if any
+  const pendingRefund = Array.from(db.refunds.values()).find(
+    (r) => r.paymentId === paymentId && (r.status === "PENDING" || r.status === "SUBMITTED" || r.status === "FAILED")
   );
+
+  const order = pendingRefund
+    ? db.orders.get(pendingRefund.orderId)
+    : Array.from(db.orders.values()).find((o) => o.razorpayPaymentId === paymentId);
+
   if (!order) {
     return { status: 404, message: "Order not found" };
   }
@@ -270,23 +310,30 @@ function processRefundWebhookMock(params: {
     return { status: 400, message: "Refund exceeds total" };
   }
 
+  if (pendingRefund) {
+    pendingRefund.status = "PROCESSED";
+    pendingRefund.razorpayRefundId = refundId;
+    pendingRefund.amountPaise = amountPaise;
+    pendingRefund.errorMessage = null;
+  } else {
+    const newRecord: MockOrderRefund = {
+      id: db.refunds.size + 1,
+      orderId: order.id,
+      paymentId,
+      razorpayRefundId: refundId,
+      idempotencyKey: `webhook_${refundId}`,
+      amountPaise,
+      reason: "LATE_CAPTURE",
+      status: "PROCESSED",
+      errorMessage: null,
+    };
+    db.refunds.set(newRecord.id, newRecord);
+  }
+
   order.refundedAmount = newRefunded;
   if (newRefunded.equals(new Prisma.Decimal(order.total))) {
     order.paymentStatus = "REFUNDED";
   }
-
-  const newRecord: MockOrderRefund = {
-    id: db.refunds.size + 1,
-    orderId: order.id,
-    paymentId,
-    razorpayRefundId: refundId,
-    idempotencyKey: `webhook_${refundId}`,
-    amountPaise,
-    reason: "LATE_CAPTURE",
-    status: "PROCESSED",
-    errorMessage: null,
-  };
-  db.refunds.set(newRecord.id, newRecord);
 
   return { status: 200, message: "Refund processed successfully" };
 }
@@ -705,6 +752,151 @@ describe("TechStore Full-Stack E-Commerce Verification Scenarios", () => {
       assert.ok(record, `Subscription record missing for event: ${evt}`);
       assert.strictEqual(record!.status, "ACTIVE");
     }
+  });
+
+  test("Scenario 17: Failed refund API request stores FAILED status and error message", () => {
+    db.reset();
+    db.products.set(1, { id: 1, name: "Adapter", stock: 10, price: 500, active: true });
+    reserveStockForOrder(1, [{ productId: 1, quantity: 1 }], 117);
+
+    const result = processLateCaptureMock({
+      orderId: 117,
+      paymentId: "pay_adapter_fail",
+      amountPaise: 50000,
+      simulateApiFailure: true,
+    });
+
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.status, "FAILED");
+    assert.match(result.message, /Payment not eligible/);
+
+    const refund = Array.from(db.refunds.values()).find((r) => r.orderId === 117)!;
+    assert.ok(refund);
+    assert.strictEqual(refund.status, "FAILED");
+    assert.match(refund.errorMessage!, /Payment not eligible/);
+  });
+
+  test("Scenario 18: In-flight 409 conflict marks SUBMITTED and reuses same idempotency key on retry", () => {
+    db.reset();
+    db.products.set(1, { id: 1, name: "Hub", stock: 5, price: 1200, active: true });
+    reserveStockForOrder(1, [{ productId: 1, quantity: 1 }], 118);
+
+    // Initial attempt receives 409 Conflict
+    const attempt1 = processLateCaptureMock({
+      orderId: 118,
+      paymentId: "pay_hub_conflict",
+      amountPaise: 120000,
+      simulateConflict409: true,
+    });
+
+    assert.strictEqual(attempt1.success, false);
+    assert.strictEqual(attempt1.status, "SUBMITTED");
+
+    const refund = Array.from(db.refunds.values()).find((r) => r.orderId === 118)!;
+    assert.strictEqual(refund.status, "SUBMITTED");
+
+    // Retry succeeds with identical idempotency key
+    const attempt2 = processLateCaptureMock({
+      orderId: 118,
+      paymentId: "pay_hub_conflict",
+      amountPaise: 120000,
+      simulateConflict409: false,
+    });
+
+    assert.strictEqual(attempt2.success, true);
+    assert.strictEqual(attempt2.status, "PROCESSED");
+    assert.strictEqual(attempt2.idempotencyKey, attempt1.idempotencyKey);
+    assert.strictEqual(db.refunds.size, 1); // No duplicates
+  });
+
+  test("Scenario 19: Webhook refund.failed updates status to FAILED without altering order amount", () => {
+    db.reset();
+    db.products.set(1, { id: 1, name: "Speaker", stock: 3, price: 4000, active: true });
+    reserveStockForOrder(1, [{ productId: 1, quantity: 1 }], 119);
+
+    const order = db.orders.get(119)!;
+    order.paymentStatus = "PAID";
+    order.razorpayPaymentId = "pay_spk_119";
+
+    // Set up a pending refund record
+    const pendingRecord: MockOrderRefund = {
+      id: 1,
+      orderId: 119,
+      paymentId: "pay_spk_119",
+      razorpayRefundId: "rfnd_spk_fail",
+      idempotencyKey: "refund_119_pay_spk_119_LATE_CAPTURE",
+      amountPaise: 400000,
+      reason: "LATE_CAPTURE",
+      status: "SUBMITTED",
+      errorMessage: null,
+    };
+    db.refunds.set(1, pendingRecord);
+
+    const res = processRefundWebhookMock({
+      refundId: "rfnd_spk_fail",
+      paymentId: "pay_spk_119",
+      amountPaise: 400000,
+      status: "failed",
+    });
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(pendingRecord.status, "FAILED");
+    assert.strictEqual(order.refundedAmount.toString(), "0");
+    assert.strictEqual(order.paymentStatus, "PAID");
+  });
+
+  test("Scenario 20: Invalid refund amount is rejected by webhook", () => {
+    db.reset();
+    const resZero = processRefundWebhookMock({
+      refundId: "rfnd_zero",
+      paymentId: "pay_any",
+      amountPaise: 0,
+      status: "processed",
+    });
+    assert.strictEqual(resZero.status, 400);
+
+    const resNegative = processRefundWebhookMock({
+      refundId: "rfnd_neg",
+      paymentId: "pay_any",
+      amountPaise: -100,
+      status: "processed",
+    });
+    assert.strictEqual(resNegative.status, 400);
+  });
+
+  test("Scenario 21: Refund for unknown payment or mismatched order returns 404", () => {
+    db.reset();
+    const res = processRefundWebhookMock({
+      refundId: "rfnd_orphan",
+      paymentId: "pay_nonexistent_xyz",
+      amountPaise: 50000,
+      status: "processed",
+    });
+
+    assert.strictEqual(res.status, 404);
+    assert.strictEqual(res.message, "Order not found");
+  });
+
+  test("Scenario 22: Refund amount cannot exceed order total", () => {
+    db.reset();
+    db.products.set(1, { id: 1, name: "Flash Drive", stock: 10, price: 1000, active: true });
+    reserveStockForOrder(1, [{ productId: 1, quantity: 1 }], 120);
+
+    const order = db.orders.get(120)!;
+    order.paymentStatus = "PAID";
+    order.razorpayPaymentId = "pay_flash_120";
+
+    // Attempt to refund ₹2000 on ₹1000 order
+    const res = processRefundWebhookMock({
+      refundId: "rfnd_exceed",
+      paymentId: "pay_flash_120",
+      amountPaise: 200000,
+      status: "processed",
+    });
+
+    assert.strictEqual(res.status, 400);
+    assert.strictEqual(res.message, "Refund exceeds total");
+    assert.strictEqual(order.refundedAmount.toString(), "0"); // Not updated
   });
 });
 

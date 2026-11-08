@@ -734,14 +734,15 @@ router.post("/", async (req, res) => {
 
     /**
      * =====================================================
-     * ONE-TIME PAYMENT EVENTS
+     * ONE-TIME PAYMENT AND REFUND EVENTS
      * =====================================================
      */
 
     if (
       event !== "payment.captured" &&
       event !== "payment.failed" &&
-      event !== "refund.processed"
+      event !== "refund.processed" &&
+      event !== "refund.failed"
     ) {
       await prisma.razorpayWebhookEvent.update({
         where: {
@@ -992,11 +993,21 @@ router.post("/", async (req, res) => {
           `Late capture detected for order ${order.id}. Stock reservation expired. Initiating automatic refund.`
         );
 
-        await processLateCaptureRefund({
+        if (paymentAmount === null) {
+          throw new Error(`Invalid payment amount for late capture order ${order.id}`);
+        }
+
+        const refundResult = await processLateCaptureRefund({
           orderId: order.id,
           paymentId: razorpayPaymentId,
           amountPaise: paymentAmount,
         });
+
+        if (!refundResult.success && refundResult.status === "FAILED") {
+          throw new Error(
+            `Late capture automatic refund failed for order ${order.id}: ${refundResult.message}`
+          );
+        }
 
         await prisma.razorpayWebhookEvent.update({
           where: {
@@ -1010,6 +1021,7 @@ router.post("/", async (req, res) => {
 
         return res.json({
           message: "Late payment detected. Automatic refund initiated.",
+          refundStatus: refundResult.status,
         });
       }
 
@@ -1139,7 +1151,7 @@ router.post("/", async (req, res) => {
               where: {
                 paymentId,
                 status: {
-                  in: ["PENDING", "SUBMITTED"],
+                  in: ["PENDING", "SUBMITTED", "FAILED"],
                 },
               },
             }));
@@ -1184,6 +1196,7 @@ router.post("/", async (req, res) => {
               data: {
                 status: "PROCESSED",
                 razorpayRefundId: refundId,
+                amountPaise: refundAmountPaise,
                 processedAt: new Date(),
                 errorMessage: null,
               },
@@ -1269,6 +1282,90 @@ router.post("/", async (req, res) => {
       return res.json({
         message:
           "Refund processed successfully",
+      });
+    }
+
+    /**
+     * =====================================================
+     * REFUND FAILED
+     * =====================================================
+     */
+
+    if (event === "refund.failed") {
+      const refund =
+        getRefundEntity(payload);
+
+      if (
+        typeof refund !== "object" ||
+        refund === null
+      ) {
+        throw new Error(
+          "Missing refund entity in webhook payload",
+        );
+      }
+
+      const refundId =
+        "id" in refund &&
+        typeof refund.id === "string"
+          ? refund.id
+          : "";
+
+      const paymentId =
+        "payment_id" in refund &&
+          typeof refund.payment_id === "string"
+          ? refund.payment_id
+          : "";
+
+      if (!refundId && !paymentId) {
+        throw new Error(
+          "Invalid refund or payment ID in refund.failed event",
+        );
+      }
+
+      await prisma.$transaction(async (tx) => {
+        // Find existing refund record by razorpayRefundId or paymentId
+        const existingRefund = refundId
+          ? await tx.orderRefund.findUnique({
+              where: {
+                razorpayRefundId: refundId,
+              },
+            })
+          : null;
+
+        const targetRefund =
+          existingRefund ??
+          (await tx.orderRefund.findFirst({
+            where: {
+              paymentId,
+              status: {
+                in: ["PENDING", "SUBMITTED"],
+              },
+            },
+          }));
+
+        if (targetRefund) {
+          await tx.orderRefund.update({
+            where: { id: targetRefund.id },
+            data: {
+              status: "FAILED",
+              errorMessage: "Refund failed according to Razorpay webhook notification",
+            },
+          });
+        }
+      });
+
+      await prisma.razorpayWebhookEvent.update({
+        where: {
+          id: eventId,
+        },
+        data: {
+          processed: true,
+          processedAt: new Date(),
+        },
+      });
+
+      return res.json({
+        message: "Refund failure recorded successfully",
       });
     }
 

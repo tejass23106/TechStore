@@ -12,7 +12,8 @@ export type LateCaptureRefundResult = {
  * Initiates or reconciles an automatic refund for a late-captured payment
  * where stock reservation expired or became unavailable.
  *
- * Implements strict idempotency using OrderRefund and the X-Razorpay-Idempotency-Key header.
+ * Implements strict idempotency using OrderRefund and the X-Refund-Idempotency header
+ * (Razorpay Refunds API requirement).
  */
 export async function processLateCaptureRefund(params: {
   orderId: number;
@@ -21,6 +22,10 @@ export async function processLateCaptureRefund(params: {
 }): Promise<LateCaptureRefundResult> {
   const { orderId, paymentId, amountPaise } = params;
 
+  if (!Number.isInteger(amountPaise) || amountPaise <= 0) {
+    throw new Error(`Invalid refund amountPaise: ${amountPaise}`);
+  }
+
   const keyId = process.env.RAZORPAY_KEY_ID;
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
 
@@ -28,9 +33,10 @@ export async function processLateCaptureRefund(params: {
     throw new Error("Razorpay credentials are not configured");
   }
 
+  // Razorpay X-Refund-Idempotency must be at least 10 chars, alphabets, numbers, hyphens, underscores.
   const idempotencyKey = `refund_${orderId}_${paymentId}_LATE_CAPTURE`;
 
-  // Step 1: Persist the refund operation in database before external API request.
+  // Step 1: Persist or retrieve the refund operation in database before external API request.
   let refundRecord = await prisma.orderRefund.findUnique({
     where: {
       orderId_paymentId_reason: {
@@ -83,6 +89,17 @@ export async function processLateCaptureRefund(params: {
     };
   }
 
+  // If previously marked FAILED, reset to PENDING so retry can proceed with the same idempotency key
+  if (refundRecord.status === "FAILED") {
+    refundRecord = await prisma.orderRefund.update({
+      where: { id: refundRecord.id },
+      data: {
+        status: "PENDING",
+        errorMessage: null,
+      },
+    });
+  }
+
   // Step 2: Call Razorpay Refund API with safe authenticated HTTP request and idempotency header.
   const authHeader = `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}`;
 
@@ -94,10 +111,10 @@ export async function processLateCaptureRefund(params: {
         headers: {
           Authorization: authHeader,
           "Content-Type": "application/json",
-          "X-Razorpay-Idempotency-Key": refundRecord.idempotencyKey,
+          "X-Refund-Idempotency": refundRecord.idempotencyKey,
         },
         body: JSON.stringify({
-          amount: amountPaise,
+          amount: refundRecord.amountPaise,
           notes: {
             orderId: String(orderId),
             reason: "LATE_CAPTURE",
@@ -105,6 +122,24 @@ export async function processLateCaptureRefund(params: {
         }),
       }
     );
+
+    // Handle 409 Conflict: Razorpay is currently processing this idempotency key in-flight
+    if (response.status === 409) {
+      const msg = "Refund request is currently being processed by Razorpay (in-flight conflict)";
+      await prisma.orderRefund.update({
+        where: { id: refundRecord.id },
+        data: {
+          status: "SUBMITTED",
+          errorMessage: msg,
+        },
+      });
+
+      return {
+        success: false,
+        status: "SUBMITTED",
+        message: msg,
+      };
+    }
 
     const responseData = (await response.json()) as {
       id?: string;
@@ -157,16 +192,22 @@ export async function processLateCaptureRefund(params: {
           });
 
           if (order) {
-            const refundRupees = new Prisma.Decimal(amountPaise).div(100);
+            const refundRupees = new Prisma.Decimal(refundRecord.amountPaise).div(100);
             const currentRefunded = new Prisma.Decimal(order.refundedAmount);
             const orderTotal = new Prisma.Decimal(order.total);
             const newRefunded = currentRefunded.plus(refundRupees);
+
+            if (newRefunded.gt(orderTotal)) {
+              throw new Error(
+                `Refund amount exceeds order total for order ${order.id}. Current: ${currentRefunded}, refund: ${refundRupees}, total: ${orderTotal}`
+              );
+            }
 
             await tx.order.update({
               where: { id: orderId },
               data: {
                 refundedAmount: newRefunded,
-                ...(newRefunded.gte(orderTotal)
+                ...(newRefunded.equals(orderTotal)
                   ? { paymentStatus: "REFUNDED" }
                   : {}),
               },
@@ -191,7 +232,7 @@ export async function processLateCaptureRefund(params: {
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.error("Error communicating with Razorpay refund API:", err);
 
-    // Keep status as PENDING or record error so it can be retried with the exact same idempotencyKey
+    // Keep status as PENDING or SUBMITTED so it can be retried with the exact same idempotencyKey
     await prisma.orderRefund.update({
       where: { id: refundRecord.id },
       data: {
@@ -206,4 +247,5 @@ export async function processLateCaptureRefund(params: {
     };
   }
 }
+
 

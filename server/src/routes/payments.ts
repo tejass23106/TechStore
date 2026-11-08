@@ -592,8 +592,14 @@ router.post(
         error instanceof Error &&
         error.message === "RESERVATION_EXPIRED_OR_UNAVAILABLE"
       ) {
+        let refundResult: {
+          success: boolean;
+          status: "PENDING" | "SUBMITTED" | "PROCESSED" | "FAILED";
+          message: string;
+        } = { success: false, status: "FAILED", message: "" };
+
         try {
-          await processLateCaptureRefund({
+          refundResult = await processLateCaptureRefund({
             orderId: parsedOrderId,
             paymentId: razorpayPaymentId,
             amountPaise: expectedAmount,
@@ -602,11 +608,22 @@ router.post(
           console.error("Failed to initiate late capture refund:", refundError);
         }
 
+        if (refundResult.success || refundResult.status === "SUBMITTED" || refundResult.status === "PROCESSED") {
+          return res.status(409).json({
+            message:
+              "Your stock reservation has expired. Your payment has been received and an automatic refund has been initiated.",
+            orderId: parsedOrderId,
+            refundInitiated: true,
+            refundStatus: refundResult.status,
+          });
+        }
+
         return res.status(409).json({
           message:
-            "Your stock reservation has expired. Your payment has been received and an automatic refund has been initiated.",
+            "Your stock reservation has expired. Your payment was captured, but the automatic refund could not be initiated immediately. Our team is processing it.",
           orderId: parsedOrderId,
-          refundInitiated: true,
+          refundInitiated: false,
+          refundStatus: refundResult.status,
         });
       }
 
