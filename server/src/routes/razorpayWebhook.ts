@@ -13,6 +13,57 @@ import prisma from "../lib/prisma.js";
 
 const router = Router();
 
+const LEASE_DURATION_MS = 60 * 1000; // 60 seconds
+const HEARTBEAT_INTERVAL_MS = 20 * 1000; // 20 seconds
+
+/**
+ * Atomically marks a webhook event as processed, only if the worker still owns the lease.
+ */
+async function completeWebhookEvent(
+  eventId: string,
+  workerToken: string
+): Promise<boolean> {
+  const result = await prisma.razorpayWebhookEvent.updateMany({
+    where: {
+      id: eventId,
+      lockedBy: workerToken,
+      processed: false,
+    },
+    data: {
+      processed: true,
+      processedAt: new Date(),
+      lockedUntil: null,
+      lockedBy: null,
+    },
+  });
+
+  return result.count === 1;
+}
+
+/**
+ * Releases the lease if the worker still owns it, without deleting the event.
+ */
+async function releaseWebhookLease(
+  eventId: string,
+  workerToken: string
+): Promise<void> {
+  try {
+    await prisma.razorpayWebhookEvent.updateMany({
+      where: {
+        id: eventId,
+        lockedBy: workerToken,
+        processed: false,
+      },
+      data: {
+        lockedUntil: null,
+        lockedBy: null,
+      },
+    });
+  } catch (err) {
+    console.error(`Failed to release lease for webhook ${eventId}:`, err);
+  }
+}
+
 function getSubscriptionEntity(payload: unknown) {
   if (
     typeof payload !== "object" ||
@@ -208,9 +259,13 @@ router.post("/", async (req, res) => {
 
     /**
      * =====================================================
-     * IDEMPOTENCY
+     * IDEMPOTENCY & LEASE CONCURRENCY CONTROL
      * =====================================================
      */
+
+    const workerToken = crypto.randomUUID();
+    const now = new Date();
+    const leaseExpiresAt = new Date(now.getTime() + LEASE_DURATION_MS);
 
     try {
       await prisma.razorpayWebhookEvent.create({
@@ -218,6 +273,8 @@ router.post("/", async (req, res) => {
           id: eventId,
           event,
           processed: false,
+          lockedUntil: leaseExpiresAt,
+          lockedBy: workerToken,
         },
       });
     } catch (error) {
@@ -225,6 +282,7 @@ router.post("/", async (req, res) => {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === "P2002"
       ) {
+        // Event already exists. Check if already processed
         const existingEvent =
           await prisma.razorpayWebhookEvent.findUnique({
             where: {
@@ -234,7 +292,7 @@ router.post("/", async (req, res) => {
 
         if (existingEvent?.processed) {
           console.log(
-            `Webhook ${eventId} already processed.`,
+            `Webhook ${eventId} already processed. Idempotent return.`,
           );
 
           return res.json({
@@ -242,18 +300,61 @@ router.post("/", async (req, res) => {
           });
         }
 
-        // Another request is actively processing this event.
-        console.log(
-          `Webhook ${eventId} is currently being processed by another worker.`,
-        );
-
-        return res.json({
-          message: "Webhook event is currently being processed",
+        // Event exists but processed is false.
+        // Try to atomically claim/renew the lease if expired or unassigned.
+        const claimResult = await prisma.razorpayWebhookEvent.updateMany({
+          where: {
+            id: eventId,
+            processed: false,
+            OR: [
+              { lockedUntil: null },
+              { lockedUntil: { lt: now } },
+            ],
+          },
+          data: {
+            lockedUntil: leaseExpiresAt,
+            lockedBy: workerToken,
+          },
         });
-      }
 
-      throw error;
+        if (claimResult.count === 0) {
+          // Another worker is actively holding the lease right now.
+          console.log(
+            `Webhook ${eventId} is currently locked by another worker.`,
+          );
+
+          // Return 429 so Razorpay backs off and retries rather than silently losing the event
+          return res.status(429).json({
+            message: "Webhook event is currently being processed by another worker. Please retry.",
+          });
+        }
+
+        console.log(
+          `Webhook ${eventId} lease acquired/recovered by worker ${workerToken}.`,
+        );
+      } else {
+        throw error;
+      }
     }
+
+    // Start background lease heartbeat to extend lock for long-running handlers
+    const heartbeatTimer = setInterval(async () => {
+      try {
+        const renewedExpiry = new Date(Date.now() + LEASE_DURATION_MS);
+        await prisma.razorpayWebhookEvent.updateMany({
+          where: {
+            id: eventId,
+            lockedBy: workerToken,
+            processed: false,
+          },
+          data: {
+            lockedUntil: renewedExpiry,
+          },
+        });
+      } catch (hbErr) {
+        console.error(`Heartbeat failed for webhook ${eventId}:`, hbErr);
+      }
+    }, HEARTBEAT_INTERVAL_MS);
 
     /**
      * =====================================================
@@ -425,15 +526,7 @@ router.post("/", async (req, res) => {
           "subscription activated",
         );
 
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message:
@@ -448,15 +541,7 @@ router.post("/", async (req, res) => {
        */
 
       if (event === "subscription.pending") {
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message: "Subscription pending",
@@ -475,15 +560,7 @@ router.post("/", async (req, res) => {
             `No local subscription found for charged subscription ${razorpaySubscriptionId}`,
           );
 
-          await prisma.razorpayWebhookEvent.update({
-            where: {
-              id: eventId,
-            },
-            data: {
-              processed: true,
-              processedAt: new Date(),
-            },
-          });
+          await completeWebhookEvent(eventId, workerToken);
 
           return res.json({
             message:
@@ -543,15 +620,7 @@ router.post("/", async (req, res) => {
           );
         }
 
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message: "Subscription renewed",
@@ -588,15 +657,7 @@ router.post("/", async (req, res) => {
            */
         }
 
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message: "Subscription halted",
@@ -652,15 +713,7 @@ router.post("/", async (req, res) => {
           `❌ Pro subscription cancelled: ${razorpaySubscriptionId}`,
         );
 
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message: "Subscription cancelled",
@@ -716,15 +769,7 @@ router.post("/", async (req, res) => {
           `⌛ Pro subscription completed: ${razorpaySubscriptionId}`,
         );
 
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message: "Subscription completed",
@@ -744,15 +789,7 @@ router.post("/", async (req, res) => {
       event !== "refund.processed" &&
       event !== "refund.failed"
     ) {
-      await prisma.razorpayWebhookEvent.update({
-        where: {
-          id: eventId,
-        },
-        data: {
-          processed: true,
-          processedAt: new Date(),
-        },
-      });
+      await completeWebhookEvent(eventId, workerToken);
 
       return res.json({
         message: "Webhook event ignored",
@@ -834,15 +871,7 @@ router.post("/", async (req, res) => {
         });
 
       if (!order) {
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message:
@@ -865,15 +894,7 @@ router.post("/", async (req, res) => {
         // The customer can retry payment while the
         // stock reservation remains valid.
 
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message: "Payment failure recorded. Retry is allowed.",
@@ -919,6 +940,14 @@ router.post("/", async (req, res) => {
           currentOrder.status === "CONFIRMED" &&
           currentOrder.paymentStatus === "PAID"
         ) {
+          if (
+            currentOrder.razorpayPaymentId &&
+            currentOrder.razorpayPaymentId !== razorpayPaymentId
+          ) {
+            return {
+              status: "ALREADY_PAID_DIFFERENT_PAYMENT" as const,
+            };
+          }
           return {
             status: "ALREADY_CONFIRMED" as const,
           };
@@ -964,6 +993,14 @@ router.post("/", async (req, res) => {
             latestOrder?.status === "CONFIRMED" &&
             latestOrder.paymentStatus === "PAID"
           ) {
+            if (
+              latestOrder.razorpayPaymentId &&
+              latestOrder.razorpayPaymentId !== razorpayPaymentId
+            ) {
+              return {
+                status: "ALREADY_PAID_DIFFERENT_PAYMENT" as const,
+              };
+            }
             return {
               status: "ALREADY_CONFIRMED" as const,
             };
@@ -988,6 +1025,35 @@ router.post("/", async (req, res) => {
         };
       });
 
+      if (result.status === "ALREADY_PAID_DIFFERENT_PAYMENT") {
+        console.warn(
+          `Order ${order.id} is already paid under a different payment ID. Initiating automatic reconciliation refund for new payment ${razorpayPaymentId}.`
+        );
+
+        if (paymentAmount === null) {
+          throw new Error(`Invalid payment amount for order ${order.id}`);
+        }
+
+        const refundResult = await processLateCaptureRefund({
+          orderId: order.id,
+          paymentId: razorpayPaymentId,
+          amountPaise: paymentAmount,
+        });
+
+        if (!refundResult.success && refundResult.status === "FAILED") {
+          throw new Error(
+            `Reconciliation refund failed for duplicate payment on order ${order.id}: ${refundResult.message}`
+          );
+        }
+
+        await completeWebhookEvent(eventId, workerToken);
+
+        return res.json({
+          message: "Order already paid with different payment ID. Automatic refund initiated for subsequent payment.",
+          refundStatus: refundResult.status,
+        });
+      }
+
       if (result.status === "RESERVATION_UNAVAILABLE") {
         console.warn(
           `Late capture detected for order ${order.id}. Stock reservation expired. Initiating automatic refund.`
@@ -1009,15 +1075,7 @@ router.post("/", async (req, res) => {
           );
         }
 
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message: "Late payment detected. Automatic refund initiated.",
@@ -1025,15 +1083,7 @@ router.post("/", async (req, res) => {
         });
       }
 
-      await prisma.razorpayWebhookEvent.update({
-        where: {
-          id: eventId,
-        },
-        data: {
-          processed: true,
-          processedAt: new Date(),
-        },
-      });
+      await completeWebhookEvent(eventId, workerToken);
 
       return res.json({
         message:
@@ -1111,15 +1161,7 @@ router.post("/", async (req, res) => {
       }
 
       if (refundStatus !== "processed") {
-        await prisma.razorpayWebhookEvent.update({
-          where: {
-            id: eventId,
-          },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+        await completeWebhookEvent(eventId, workerToken);
 
         return res.json({
           message:
@@ -1129,7 +1171,7 @@ router.post("/", async (req, res) => {
 
       await prisma.$transaction(
         async (tx) => {
-          // 1. Check if this Razorpay refund ID was already processed
+          // 1. Check if this exact Razorpay refund ID was already recorded
           const existingRefundById =
             await tx.orderRefund.findUnique({
               where: {
@@ -1137,30 +1179,56 @@ router.post("/", async (req, res) => {
               },
             });
 
-          if (existingRefundById?.status === "PROCESSED") {
-            console.log(
-              `Refund ${refundId} already processed.`,
-            );
-            return;
+          if (existingRefundById) {
+            // Validate that the existing record matches the incoming webhook's paymentId
+            if (existingRefundById.paymentId !== paymentId) {
+              throw new Error(
+                `Refund ID ${refundId} belongs to payment ${existingRefundById.paymentId}, but webhook reported payment ${paymentId}`
+              );
+            }
+
+            if (existingRefundById.status === "PROCESSED") {
+              console.log(
+                `Refund ${refundId} already processed. Idempotent webhook delivery.`,
+              );
+              return;
+            }
           }
 
-          // 2. Find pending/submitted refund record for this payment if any
-          const pendingRefund =
-            existingRefundById ??
-            (await tx.orderRefund.findFirst({
+          // 2. Find eligible candidate refund record for this payment
+          let candidateRefund = existingRefundById;
+
+          if (!candidateRefund) {
+            // Find all pending/submitted/failed candidate records matching paymentId and exact amountPaise
+            const matchingCandidates = await tx.orderRefund.findMany({
               where: {
                 paymentId,
+                amountPaise: refundAmountPaise,
+                razorpayRefundId: null,
                 status: {
                   in: ["PENDING", "SUBMITTED", "FAILED"],
                 },
               },
-            }));
+            });
+
+            if (matchingCandidates.length === 1) {
+              candidateRefund = matchingCandidates[0];
+            } else if (matchingCandidates.length > 1) {
+              // Ambiguous candidates: Cannot safely pick one or create duplicate due to @@unique([orderId, paymentId, reason])
+              console.warn(
+                `Ambiguous refund.processed: ${matchingCandidates.length} candidate records match payment ${paymentId} and amount ${refundAmountPaise}. Rejecting to preserve accounting.`
+              );
+              throw new Error(
+                `Ambiguous candidate refunds for payment ${paymentId} and amount ${refundAmountPaise}. Manual reconciliation required.`
+              );
+            }
+          }
 
           // 3. Find the associated order
-          const order = pendingRefund
+          const order = candidateRefund
             ? await tx.order.findUnique({
                 where: {
-                  id: pendingRefund.orderId,
+                  id: candidateRefund.orderId,
                 },
               })
             : await tx.order.findFirst({
@@ -1187,11 +1255,11 @@ router.post("/", async (req, res) => {
             return;
           }
 
-          // 4. Update or create the OrderRefund record
-          if (pendingRefund) {
+          // 4. Update candidate or create new OrderRefund record
+          if (candidateRefund) {
             await tx.orderRefund.update({
               where: {
-                id: pendingRefund.id,
+                id: candidateRefund.id,
               },
               data: {
                 status: "PROCESSED",
@@ -1202,18 +1270,47 @@ router.post("/", async (req, res) => {
               },
             });
           } else {
-            await tx.orderRefund.create({
-              data: {
-                orderId: order.id,
-                paymentId,
-                razorpayRefundId: refundId,
-                idempotencyKey: `webhook_refund_${refundId}`,
-                amountPaise: refundAmountPaise,
-                reason: "LATE_CAPTURE",
-                status: "PROCESSED",
-                processedAt: new Date(),
+            // Check if a record already exists with (orderId, paymentId, reason: "LATE_CAPTURE")
+            const existingForUniqueConstraint = await tx.orderRefund.findUnique({
+              where: {
+                orderId_paymentId_reason: {
+                  orderId: order.id,
+                  paymentId,
+                  reason: "LATE_CAPTURE",
+                },
               },
             });
+
+            if (existingForUniqueConstraint) {
+              if (existingForUniqueConstraint.razorpayRefundId && existingForUniqueConstraint.razorpayRefundId !== refundId) {
+                throw new Error(
+                  `Conflict: OrderRefund for order ${order.id} and payment ${paymentId} already bound to refund ${existingForUniqueConstraint.razorpayRefundId}`
+                );
+              }
+              await tx.orderRefund.update({
+                where: { id: existingForUniqueConstraint.id },
+                data: {
+                  status: "PROCESSED",
+                  razorpayRefundId: refundId,
+                  amountPaise: refundAmountPaise,
+                  processedAt: new Date(),
+                  errorMessage: null,
+                },
+              });
+            } else {
+              await tx.orderRefund.create({
+                data: {
+                  orderId: order.id,
+                  paymentId,
+                  razorpayRefundId: refundId,
+                  idempotencyKey: `webhook_refund_${refundId}`,
+                  amountPaise: refundAmountPaise,
+                  reason: "LATE_CAPTURE",
+                  status: "PROCESSED",
+                  processedAt: new Date(),
+                },
+              });
+            }
           }
 
           // 5. Calculate and apply refund to order
@@ -1269,15 +1366,7 @@ router.post("/", async (req, res) => {
         },
       );
 
-      await prisma.razorpayWebhookEvent.update({
-        where: {
-          id: eventId,
-        },
-        data: {
-          processed: true,
-          processedAt: new Date(),
-        },
-      });
+      await completeWebhookEvent(eventId, workerToken);
 
       return res.json({
         message:
@@ -1316,6 +1405,12 @@ router.post("/", async (req, res) => {
           ? refund.payment_id
           : "";
 
+      const refundAmountPaise =
+        "amount" in refund &&
+          typeof refund.amount === "number"
+          ? refund.amount
+          : null;
+
       if (!refundId && !paymentId) {
         throw new Error(
           "Invalid refund or payment ID in refund.failed event",
@@ -1323,61 +1418,72 @@ router.post("/", async (req, res) => {
       }
 
       await prisma.$transaction(async (tx) => {
-        // Find existing refund record by razorpayRefundId or paymentId
-        const existingRefund = refundId
-          ? await tx.orderRefund.findUnique({
-              where: {
-                razorpayRefundId: refundId,
-              },
-            })
-          : null;
-
-        const targetRefund =
-          existingRefund ??
-          (await tx.orderRefund.findFirst({
+        if (refundId) {
+          // If a refund ID is supplied, search strictly for that refund ID
+          const existingRefund = await tx.orderRefund.findUnique({
             where: {
-              paymentId,
-              status: {
-                in: ["PENDING", "SUBMITTED"],
-              },
+              razorpayRefundId: refundId,
             },
-          }));
+          });
 
-        if (targetRefund) {
+          if (!existingRefund) {
+            console.warn(
+              `refund.failed received for unknown refund ID: ${refundId}. No unrelated record will be modified.`
+            );
+            return;
+          }
+
+          // Verify payment ID consistency if both are present
+          if (paymentId && existingRefund.paymentId !== paymentId) {
+            console.warn(
+              `Payment ID mismatch on refund.failed: record has ${existingRefund.paymentId}, webhook reported ${paymentId}`
+            );
+            return;
+          }
+
           await tx.orderRefund.update({
-            where: { id: targetRefund.id },
+            where: { id: existingRefund.id },
             data: {
               status: "FAILED",
               errorMessage: "Refund failed according to Razorpay webhook notification",
             },
           });
+        } else {
+          // Matching without refundId: require unambiguous candidate matching paymentId and amountPaise
+          const candidates = await tx.orderRefund.findMany({
+            where: {
+              paymentId,
+              status: {
+                in: ["PENDING", "SUBMITTED"],
+              },
+              ...(refundAmountPaise ? { amountPaise: refundAmountPaise } : {}),
+            },
+          });
+
+          if (candidates.length === 1) {
+            await tx.orderRefund.update({
+              where: { id: candidates[0].id },
+              data: {
+                status: "FAILED",
+                errorMessage: "Refund failed according to Razorpay webhook notification",
+              },
+            });
+          } else {
+            console.warn(
+              `Cannot unambiguously match refund.failed without refund ID: found ${candidates.length} candidates for payment ${paymentId}.`
+            );
+          }
         }
       });
 
-      await prisma.razorpayWebhookEvent.update({
-        where: {
-          id: eventId,
-        },
-        data: {
-          processed: true,
-          processedAt: new Date(),
-        },
-      });
+      await completeWebhookEvent(eventId, workerToken);
 
       return res.json({
         message: "Refund failure recorded successfully",
       });
     }
 
-    await prisma.razorpayWebhookEvent.update({
-      where: {
-        id: eventId,
-      },
-      data: {
-        processed: true,
-        processedAt: new Date(),
-      },
-    });
+    await completeWebhookEvent(eventId, workerToken);
 
     return res.json({
       message: "Webhook processed successfully",

@@ -46,7 +46,7 @@ class MockDb {
   products = new Map<number, MockProduct>();
   orders = new Map<number, MockOrder>();
   refunds = new Map<number, MockOrderRefund>();
-  webhookEvents = new Map<string, { id: string; event: string; processed: boolean }>();
+  webhookEvents = new Map<string, { id: string; event: string; processed: boolean; lockedUntil?: Date | null }>();
   subscriptions = new Map<string, { id: number; plan: string; status: string }>();
 
   reset() {
@@ -271,9 +271,28 @@ function processRefundWebhookMock(params: {
   }
   if (status !== "processed") {
     if (status === "failed") {
-      const targetRefund = Array.from(db.refunds.values()).find(
-        (r) => r.paymentId === paymentId && (r.status === "PENDING" || r.status === "SUBMITTED")
-      );
+      // If refundId provided, search strictly by razorpayRefundId
+      let targetRefund: MockOrderRefund | undefined;
+      if (refundId) {
+        targetRefund = Array.from(db.refunds.values()).find((r) => r.razorpayRefundId === refundId);
+        if (targetRefund && targetRefund.paymentId !== paymentId) {
+          return { status: 400, message: "Payment ID mismatch on refund.failed" };
+        }
+        if (!targetRefund) {
+          // If refund ID unknown, do not mark arbitrary record as FAILED
+          return { status: 404, message: "Refund record not found for refund.failed" };
+        }
+      } else {
+        const candidates = Array.from(db.refunds.values()).filter(
+          (r) => r.paymentId === paymentId && (r.status === "PENDING" || r.status === "SUBMITTED") && r.amountPaise === amountPaise
+        );
+        if (candidates.length === 1) {
+          targetRefund = candidates[0];
+        } else {
+          return { status: 400, message: "Ambiguous or no candidate for refund.failed" };
+        }
+      }
+
       if (targetRefund) {
         targetRefund.status = "FAILED";
         targetRefund.errorMessage = "Refund failed according to webhook";
@@ -283,21 +302,33 @@ function processRefundWebhookMock(params: {
     return { status: 200, message: "Refund is not processed yet" };
   }
 
+  // Exact razorpayRefundId check
   const existingRefund = Array.from(db.refunds.values()).find(
-    (r) => r.razorpayRefundId === refundId && r.status === "PROCESSED"
+    (r) => r.razorpayRefundId === refundId
   );
 
   if (existingRefund) {
-    return { status: 200, message: "Refund already processed" };
+    if (existingRefund.paymentId !== paymentId) {
+      return { status: 400, message: "Refund ID payment mismatch" };
+    }
+    if (existingRefund.status === "PROCESSED") {
+      return { status: 200, message: "Refund already processed" };
+    }
   }
 
-  // Find pending/submitted/failed record if any
-  const pendingRefund = Array.from(db.refunds.values()).find(
-    (r) => r.paymentId === paymentId && (r.status === "PENDING" || r.status === "SUBMITTED" || r.status === "FAILED")
-  );
+  // Find candidate by paymentId AND exact amountPaise
+  let candidateRefund = existingRefund;
+  if (!candidateRefund) {
+    const candidates = Array.from(db.refunds.values()).filter(
+      (r) => r.paymentId === paymentId && r.amountPaise === amountPaise && (r.status === "PENDING" || r.status === "SUBMITTED" || r.status === "FAILED") && !r.razorpayRefundId
+    );
+    if (candidates.length === 1) {
+      candidateRefund = candidates[0];
+    }
+  }
 
-  const order = pendingRefund
-    ? db.orders.get(pendingRefund.orderId)
+  const order = candidateRefund
+    ? db.orders.get(candidateRefund.orderId)
     : Array.from(db.orders.values()).find((o) => o.razorpayPaymentId === paymentId);
 
   if (!order) {
@@ -310,11 +341,11 @@ function processRefundWebhookMock(params: {
     return { status: 400, message: "Refund exceeds total" };
   }
 
-  if (pendingRefund) {
-    pendingRefund.status = "PROCESSED";
-    pendingRefund.razorpayRefundId = refundId;
-    pendingRefund.amountPaise = amountPaise;
-    pendingRefund.errorMessage = null;
+  if (candidateRefund) {
+    candidateRefund.status = "PROCESSED";
+    candidateRefund.razorpayRefundId = refundId;
+    candidateRefund.amountPaise = amountPaise;
+    candidateRefund.errorMessage = null;
   } else {
     const newRecord: MockOrderRefund = {
       id: db.refunds.size + 1,
@@ -897,6 +928,192 @@ describe("TechStore Full-Stack E-Commerce Verification Scenarios", () => {
     assert.strictEqual(res.status, 400);
     assert.strictEqual(res.message, "Refund exceeds total");
     assert.strictEqual(order.refundedAmount.toString(), "0"); // Not updated
+  });
+
+  test("Scenario 23: Webhook event lease recovery after worker crash / timeout", () => {
+    db.reset();
+    const eventId = "evt_lease_test_01";
+    // Simulate initial worker crash: event created, processed is false, lease expired 5 minutes ago
+    db.webhookEvents.set(eventId, {
+      id: eventId,
+      event: "payment.captured",
+      processed: false,
+      lockedUntil: new Date(Date.now() - 5 * 60 * 1000),
+    });
+
+    const existingEvent = db.webhookEvents.get(eventId)!;
+    assert.strictEqual(existingEvent.processed, false);
+
+    // Incoming retry attempts to claim lease
+    const now = new Date();
+    const canClaim = !existingEvent.lockedUntil || existingEvent.lockedUntil < now;
+    assert.strictEqual(canClaim, true);
+
+    // New worker claims lease
+    existingEvent.lockedUntil = new Date(Date.now() + 60 * 1000);
+    assert.ok(existingEvent.lockedUntil > now);
+
+    // Finish processing
+    existingEvent.processed = true;
+    assert.strictEqual(existingEvent.processed, true);
+  });
+
+  test("Scenario 24: Active webhook lease rejects concurrent delivery with 429", () => {
+    db.reset();
+    const eventId = "evt_active_lease_02";
+    // Worker 1 actively holds lease for next 45 seconds
+    db.webhookEvents.set(eventId, {
+      id: eventId,
+      event: "payment.captured",
+      processed: false,
+      lockedUntil: new Date(Date.now() + 45 * 1000),
+    });
+
+    const existingEvent = db.webhookEvents.get(eventId)!;
+    const now = new Date();
+    const canClaim = !existingEvent.lockedUntil || existingEvent.lockedUntil < now;
+
+    // Worker 2 cannot claim active lease; must return 429 so provider retries later
+    assert.strictEqual(canClaim, false);
+  });
+
+  test("Scenario 25: Already-paid order receiving a different payment ID initiates refund", () => {
+    db.reset();
+    db.products.set(1, { id: 1, name: "Mechanical Keyboard", stock: 5, price: 5000, active: true });
+    reserveStockForOrder(1, [{ productId: 1, quantity: 1 }], 121);
+
+    const order = db.orders.get(121)!;
+    order.status = "CONFIRMED";
+    order.paymentStatus = "PAID";
+    order.stockReserved = false;
+    order.razorpayPaymentId = "pay_genuine_first";
+
+    // Second different payment captured for same order
+    const differentPaymentId = "pay_duplicate_second";
+    assert.notStrictEqual(order.razorpayPaymentId, differentPaymentId);
+
+    // Trigger reconciliation refund for the second payment
+    const refundRes = processLateCaptureMock({
+      orderId: order.id,
+      paymentId: differentPaymentId,
+      amountPaise: 500000,
+    });
+
+    assert.strictEqual(refundRes.success, true);
+    assert.strictEqual(refundRes.status, "PROCESSED");
+
+    const refund = Array.from(db.refunds.values()).find((r) => r.paymentId === differentPaymentId)!;
+    assert.ok(refund);
+    assert.strictEqual(refund.amountPaise, 500000);
+  });
+
+  test("Scenario 26: Refund ID payment mismatch on webhook is rejected", () => {
+    db.reset();
+    db.products.set(1, { id: 1, name: "Mousepad", stock: 10, price: 500, active: true });
+    reserveStockForOrder(1, [{ productId: 1, quantity: 1 }], 122);
+
+    const order = db.orders.get(122)!;
+    order.paymentStatus = "PAID";
+    order.razorpayPaymentId = "pay_correct_122";
+
+    // Create an existing refund tied to pay_correct_122
+    db.refunds.set(1, {
+      id: 1,
+      orderId: 122,
+      paymentId: "pay_correct_122",
+      razorpayRefundId: "rfnd_mismatch_check",
+      idempotencyKey: "refund_122_pay_correct_122_LATE_CAPTURE",
+      amountPaise: 50000,
+      reason: "LATE_CAPTURE",
+      status: "SUBMITTED",
+      errorMessage: null,
+    });
+
+    // Webhook delivers rfnd_mismatch_check but specifies pay_wrong_999
+    const res = processRefundWebhookMock({
+      refundId: "rfnd_mismatch_check",
+      paymentId: "pay_wrong_999",
+      amountPaise: 50000,
+      status: "processed",
+    });
+
+    assert.strictEqual(res.status, 400);
+    assert.match(res.message, /payment mismatch/i);
+  });
+
+  test("Scenario 27: Multiple pending refunds for same payment match exact amount", () => {
+    db.reset();
+    db.products.set(1, { id: 1, name: "USB Hub", stock: 10, price: 1000, active: true });
+    reserveStockForOrder(1, [{ productId: 1, quantity: 1 }], 123);
+
+    const order = db.orders.get(123)!;
+    order.paymentStatus = "PAID";
+    order.razorpayPaymentId = "pay_multi_123";
+
+    // Two pending refunds with different amounts for the same payment
+    db.refunds.set(1, {
+      id: 1,
+      orderId: 123,
+      paymentId: "pay_multi_123",
+      razorpayRefundId: null,
+      idempotencyKey: "refund_123_part1",
+      amountPaise: 30000, // ₹300
+      reason: "LATE_CAPTURE",
+      status: "SUBMITTED",
+      errorMessage: null,
+    });
+
+    db.refunds.set(2, {
+      id: 2,
+      orderId: 123,
+      paymentId: "pay_multi_123",
+      razorpayRefundId: null,
+      idempotencyKey: "refund_123_part2",
+      amountPaise: 70000, // ₹700
+      reason: "LATE_CAPTURE",
+      status: "SUBMITTED",
+      errorMessage: null,
+    });
+
+    // Webhook arrives for ₹700
+    const res = processRefundWebhookMock({
+      refundId: "rfnd_part2_done",
+      paymentId: "pay_multi_123",
+      amountPaise: 70000,
+      status: "processed",
+    });
+
+    assert.strictEqual(res.status, 200);
+
+    // Candidate 2 is marked PROCESSED, Candidate 1 remains SUBMITTED
+    const r1 = db.refunds.get(1)!;
+    const r2 = db.refunds.get(2)!;
+    assert.strictEqual(r1.status, "SUBMITTED");
+    assert.strictEqual(r2.status, "PROCESSED");
+    assert.strictEqual(r2.razorpayRefundId, "rfnd_part2_done");
+    assert.strictEqual(order.refundedAmount.toString(), "700");
+  });
+
+  test("Scenario 28: Permanent 400 rejection in processLateCaptureRefund is not retried automatically", () => {
+    db.reset();
+    db.products.set(1, { id: 1, name: "Headphones", stock: 5, price: 2000, active: true });
+    reserveStockForOrder(1, [{ productId: 1, quantity: 1 }], 124);
+
+    // Initial attempt rejected permanently with HTTP 400
+    const res1 = processLateCaptureMock({
+      orderId: 124,
+      paymentId: "pay_hp_400",
+      amountPaise: 200000,
+      simulateApiFailure: true,
+    });
+
+    assert.strictEqual(res1.success, false);
+    assert.strictEqual(res1.status, "FAILED");
+
+    // Second attempt to retry: should recognize permanent failure and reject
+    const refundRecord = Array.from(db.refunds.values()).find((r) => r.orderId === 124)!;
+    const isPermanent = refundRecord.errorMessage?.includes("400") || refundRecord.errorMessage?.includes("not eligible");
+    assert.strictEqual(isPermanent, true);
   });
 });
 

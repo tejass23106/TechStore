@@ -282,8 +282,12 @@ model RazorpayWebhookEvent {
   processed   Boolean   @default(false)
   processedAt DateTime?
   receivedAt  DateTime  @default(now())
+  lockedUntil DateTime?
+  lockedBy    String?
 
   @@index([processed])
+  @@index([lockedUntil])
+  @@index([lockedBy])
 }
 
 model OrderRefund {
