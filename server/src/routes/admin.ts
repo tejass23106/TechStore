@@ -583,10 +583,8 @@ throw new Error(
   where: {
   id: orderId,
   },
-  select: {
-  id: true,
-  status: true,
-  paymentStatus: true,
+  include: {
+    items: true,
   },
   });
 
@@ -596,51 +594,107 @@ throw new Error(
   });
   }
 
+  // Idempotency: if already at the requested status, return success
+  if (existingOrder.status === status) {
+    return res.json({
+      message: "Order status updated successfully",
+      order: existingOrder,
+    });
+  }
+
+  // Terminal states cannot be changed
+  if (existingOrder.status === "DELIVERED") {
+    return res.status(400).json({
+      message: "A delivered order cannot be moved to another status",
+    });
+  }
+
+  if (existingOrder.status === "CANCELLED") {
+    return res.status(400).json({
+      message: "A cancelled order cannot be reopened or shipped",
+    });
+  }
+
   /*
-  * Payment state is controlled by the
-  * Razorpay payment/webhook flow.
-  *
+  * Payment state is controlled by the Razorpay payment/webhook flow.
   * Admin may only change fulfillment status.
+  *
+  * Confirming, processing, shipping, or delivering an unpaid order is prohibited.
   */
-
   if (
-  status === "DELIVERED" &&
-  existingOrder.paymentStatus !== "PAID"
+    (status === "CONFIRMED" ||
+      status === "PROCESSING" ||
+      status === "SHIPPED" ||
+      status === "DELIVERED") &&
+    existingOrder.paymentStatus !== "PAID"
   ) {
-  return res.status(400).json({
-  message:
-  "An order cannot be marked delivered before payment is confirmed",
-  });
+    return res.status(400).json({
+      message:
+        "An order cannot be confirmed, processed, shipped, or delivered before payment is confirmed",
+    });
   }
 
-  if (
-  status === "CONFIRMED" &&
-  existingOrder.paymentStatus !== "PAID"
-  ) {
-  return res.status(400).json({
-  message:
-  "An order cannot be confirmed before payment is confirmed",
-  });
+  // Shipping requires an order to be CONFIRMED or PROCESSING
+  if (status === "SHIPPED") {
+    if (
+      existingOrder.status !== "CONFIRMED" &&
+      existingOrder.status !== "PROCESSING"
+    ) {
+      return res.status(400).json({
+        message:
+          "An order must be confirmed or in processing before it can be shipped",
+      });
+    }
   }
 
-  if (
-  existingOrder.status === "DELIVERED" &&
-  status !== "DELIVERED"
-  ) {
-  return res.status(400).json({
-  message:
-  "A delivered order cannot be moved back to an earlier status",
-  });
+  // Delivering requires an order to have been SHIPPED
+  if (status === "DELIVERED") {
+    if (existingOrder.status !== "SHIPPED") {
+      return res.status(400).json({
+        message:
+          "An order must be shipped before it can be marked as delivered",
+      });
+    }
   }
 
-  if (
-  existingOrder.status === "CANCELLED" &&
-  status !== "CANCELLED"
-  ) {
-  return res.status(400).json({
-  message:
-  "A cancelled order cannot be reopened",
-  });
+  // Cancelling an order
+  if (status === "CANCELLED") {
+    if (existingOrder.status === "SHIPPED") {
+      return res.status(400).json({
+        message: "A shipped order cannot be cancelled directly",
+      });
+    }
+
+    const order = await prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: "CANCELLED",
+          stockReserved: false,
+        },
+      });
+
+      // If stock was reserved for this order (unpaid reservation), restore stock
+      if (existingOrder.stockReserved) {
+        for (const item of existingOrder.items) {
+          await tx.product.update({
+            where: { id: item.productId },
+            data: {
+              stock: {
+                increment: item.quantity,
+              },
+            },
+          });
+        }
+      }
+
+      return updated;
+    });
+
+    return res.json({
+      message: "Order status updated successfully",
+      order,
+    });
   }
 
   const order =

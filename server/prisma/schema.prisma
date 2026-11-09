@@ -203,12 +203,25 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum RefundStatus {
+  PENDING
+  SUBMITTED
+  PROCESSED
+  FAILED
+}
+
+enum RefundReason {
+  LATE_CAPTURE
+}
+
 model Order {
-  id            Int           @id @default(autoincrement())
-  userId        Int
-  addressId     Int?
-  status        OrderStatus   @default(PENDING)
-  paymentStatus PaymentStatus @default(PENDING)
+  id                   Int           @id @default(autoincrement())
+  userId               Int
+  addressId            Int?
+  status               OrderStatus   @default(PENDING)
+  paymentStatus        PaymentStatus @default(PENDING)
+  stockReserved        Boolean       @default(false)
+  reservationExpiresAt DateTime?
 
   subtotal          Int
   deliveryFee       Int     @default(0)
@@ -221,13 +234,15 @@ model Order {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  address Address?    @relation(fields: [addressId], references: [id], onDelete: SetNull)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  address Address?      @relation(fields: [addressId], references: [id], onDelete: SetNull)
   items   OrderItem[]
+  refunds OrderRefund[]
 
   @@index([userId])
   @@index([status])
   @@index([paymentStatus])
+  @@index([stockReserved, reservationExpiresAt])
 }
 
 model OrderItem {
@@ -267,6 +282,31 @@ model RazorpayWebhookEvent {
   processed   Boolean   @default(false)
   processedAt DateTime?
   receivedAt  DateTime  @default(now())
+  lockedUntil DateTime?
+  lockedBy    String?
 
   @@index([processed])
+  @@index([lockedUntil])
+  @@index([lockedBy])
+}
+
+model OrderRefund {
+  id               Int          @id @default(autoincrement())
+  orderId          Int
+  paymentId        String
+  razorpayRefundId String?      @unique
+  idempotencyKey   String       @unique
+  amountPaise      Int
+  reason           RefundReason
+  status           RefundStatus @default(PENDING)
+  errorMessage     String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  processedAt DateTime?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@unique([orderId, paymentId, reason])
+  @@index([status])
 }

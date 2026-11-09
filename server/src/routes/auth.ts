@@ -38,10 +38,12 @@ function setSessionCookie(
   res: Response,
   sessionId: string
 ) {
+  const isProduction = process.env.NODE_ENV === "production";
+
   res.cookie("techstore_session", sessionId, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "none",
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
     maxAge:
       SESSION_DURATION_DAYS *
       24 *
@@ -49,6 +51,17 @@ function setSessionCookie(
       60 *
       1000,
     path: "/",
+  });
+}
+
+function clearSessionCookie(res: Response) {
+  const isProduction = process.env.NODE_ENV === "production";
+
+  res.clearCookie("techstore_session", {
+    path: "/",
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
   });
 }
 
@@ -790,7 +803,7 @@ req.cookies?.techstore_session;
     });
 
   if (!session) {
-    res.clearCookie("techstore_session");
+    clearSessionCookie(res);
 
     return res.status(401).json({
       message: "Session not found",
@@ -804,7 +817,7 @@ req.cookies?.techstore_session;
       },
     });
 
-    res.clearCookie("techstore_session");
+    clearSessionCookie(res);
 
     return res.status(401).json({
       message:
@@ -908,9 +921,7 @@ req.cookies?.techstore_session;
     });
 
   if (!session) {
-    res.clearCookie(
-      "techstore_session"
-    );
+    clearSessionCookie(res);
 
     return res.status(401).json({
       message: "Session not found",
@@ -924,9 +935,7 @@ req.cookies?.techstore_session;
       },
     });
 
-    res.clearCookie(
-      "techstore_session"
-    );
+    clearSessionCookie(res);
 
     return res.status(401).json({
       message: "Session expired",
@@ -987,9 +996,7 @@ req.cookies?.techstore_session;
     });
   }
 
-  res.clearCookie(
-    "techstore_session"
-  );
+  clearSessionCookie(res);
 
   return res.json({
     message: "Logout successful",

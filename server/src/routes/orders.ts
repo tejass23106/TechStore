@@ -12,6 +12,7 @@ type AuthenticatedRequest,
 } from "../Middleware/auth.js";
 
 import { sendOrderConfirmationEmail } from "../lib/email.js";
+import { releaseExpiredStockReservations } from "../lib/stockReservations.js";
 
 const router = Router();
 
@@ -38,98 +39,120 @@ const router = Router();
   pincode,
   } = req.body;
 
-  const order = await prisma.$transaction(async (tx) => {
-  /**
-  * Read the authenticated user's cart inside the transaction.
-  * Prices and stock are therefore taken from the same database
-  * snapshot used to create the order.
-  */
+  const reservationExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+const order = await prisma.$transaction(async (tx) => {
   const cart = await tx.cart.findUnique({
-  where: {
-  userId,
-  },
-  include: {
-  items: {
-  include: {
-  product: true,
-  },
-  orderBy: {
-  id: "asc",
-  },
-  },
-  },
+    where: { userId },
+    include: {
+      items: {
+        include: { product: true },
+        orderBy: { id: "asc" },
+      },
+    },
   });
 
-  
-   if (!cart || cart.items.length === 0) {
-     throw new Error("CART_EMPTY");
-   }
+  if (!cart || cart.items.length === 0) {
+    throw new Error("CART_EMPTY");
+  }
 
-   let subtotal = 0;
+  let subtotal = 0;
 
-   for (const item of cart.items) {
-     if (!item.product.active) {
-       throw new Error("PRODUCT_INACTIVE");
-     }
+  for (const item of cart.items) {
+    if (!item.product.active) {
+      throw new Error("PRODUCT_INACTIVE");
+    }
 
-     if (item.quantity < 1 || item.quantity > 99) {
-       throw new Error("INVALID_CART_QUANTITY");
-     }
+    if (item.quantity < 1 || item.quantity > 99) {
+      throw new Error("INVALID_CART_QUANTITY");
+    }
 
-     if (item.product.stock < item.quantity) {
-       throw new Error(
-         `INSUFFICIENT_STOCK:${item.product.name}:${item.product.stock}`
-       );
-     }
+    subtotal += item.product.price * item.quantity;
+  }
 
-     subtotal += item.product.price * item.quantity;
-   }
+  // Atomically reserve stock for every cart item.
+  // If any reservation fails, the transaction rolls back.
+  for (const item of cart.items) {
+    const reservation = await tx.product.updateMany({
+      where: {
+        id: item.productId,
+        active: true,
+        stock: {
+          gte: item.quantity,
+        },
+      },
+      data: {
+        stock: {
+          decrement: item.quantity,
+        },
+      },
+    });
 
-   const deliveryFee = 0;
-   const total = subtotal + deliveryFee;
+    if (reservation.count !== 1) {
+      const currentProduct = await tx.product.findUnique({
+        where: { id: item.productId },
+        select: {
+          name: true,
+          stock: true,
+          active: true,
+        },
+      });
 
-   const savedAddress = await tx.address.create({
-     data: {
-       userId,
-       firstName: firstName.trim(),
-       lastName: lastName.trim(),
-       phone: phone.trim(),
-       addressLine: address.trim(),
-       city: city.trim(),
-       state: state.trim(),
-       pincode: pincode.trim(),
-     },
-   });
+      if (!currentProduct?.active) {
+        throw new Error("PRODUCT_INACTIVE");
+      }
 
-   return tx.order.create({
-     data: {
-       userId,
-       addressId: savedAddress.id,
-       status: "PENDING",
-       paymentStatus: "PENDING",
-       subtotal,
-       deliveryFee,
-       total,
-       items: {
-         create: cart.items.map((item) => ({
-           productId: item.productId,
-           quantity: item.quantity,
-           unitPrice: item.product.price,
-         })),
-       },
-     },
-     include: {
-       address: true,
-       items: {
-         include: {
-           product: true,
-         },
-       },
-     },
-   });
-  
+      throw new Error(
+        `INSUFFICIENT_STOCK:${currentProduct.name}:${currentProduct.stock}`
+      );
+    }
+  }
 
+  const deliveryFee = 0;
+  const total = subtotal + deliveryFee;
+
+  const savedAddress = await tx.address.create({
+    data: {
+      userId,
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      phone: phone.trim(),
+      addressLine: address.trim(),
+      city: city.trim(),
+      state: state.trim(),
+      pincode: pincode.trim(),
+    },
   });
+
+  return tx.order.create({
+    data: {
+      userId,
+      addressId: savedAddress.id,
+      status: "PENDING",
+      paymentStatus: "PENDING",
+      stockReserved: true,
+      reservationExpiresAt,
+      subtotal,
+      deliveryFee,
+      total,
+      items: {
+        create: cart.items.map((item) => ({
+          productId: item.productId,
+          quantity: item.quantity,
+          unitPrice: item.product.price,
+        })),
+      },
+    },
+    include: {
+      address: true,
+      items: {
+        include: {
+          product: true,
+        },
+      },
+    },
+  });
+});
 
   /**
   * Send order email after the database transaction succeeds.
@@ -299,5 +322,60 @@ const router = Router();
   }
   }
   );
+
+/**
+ * POST /api/orders/release-expired
+ * Protected endpoint for releasing expired stock reservations.
+ * Requires admin authentication or CRON_SECRET header.
+ */
+router.post("/release-expired", async (req, res) => {
+  try {
+    const cronSecret = process.env.CRON_SECRET;
+    const headerSecret =
+      req.header("x-cron-secret") ||
+      req.header("authorization")?.replace(/^Bearer\s+/i, "");
+
+    let isAuthorized = Boolean(
+      cronSecret && headerSecret && cronSecret === headerSecret
+    );
+
+    if (!isAuthorized) {
+      const sessionId = req.cookies?.techstore_session;
+      if (sessionId) {
+        const session = await prisma.session.findUnique({
+          where: { id: sessionId },
+          include: { user: true },
+        });
+
+        if (
+          session &&
+          session.expiresAt >= new Date() &&
+          session.user.role === "ADMIN"
+        ) {
+          isAuthorized = true;
+        }
+      }
+    }
+
+    if (!isAuthorized) {
+      return res.status(401).json({
+        message: "Unauthorized to release expired reservations",
+      });
+    }
+
+    const result = await releaseExpiredStockReservations();
+
+    return res.json({
+      message: "Expired stock reservations released successfully",
+      ...result,
+    });
+  } catch (error) {
+    console.error("Release expired reservations error:", error);
+
+    return res.status(500).json({
+      message: "Failed to release expired reservations",
+    });
+  }
+});
 
 export default router;

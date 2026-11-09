@@ -83,75 +83,96 @@ router.post(
         });
       }
 
-      const product = await prisma.product.findUnique({
-       where: {
-  id: productId,
-  active: true,
-},
-      });
-
-      if (!product) {
-        return res.status(404).json({
-          message: "Product not found",
-        });
-      }
-
-      if (product.stock < quantity) {
+      if (quantity > 99) {
         return res.status(400).json({
-          message: "Requested quantity exceeds available stock",
+          message: "Quantity cannot exceed 99",
         });
       }
 
-      const cart = await prisma.cart.upsert({
-        where: {
-          userId,
-        },
-        create: {
-          userId,
-        },
-        update: {},
-      });
+      await prisma.$transaction(async (tx) => {
+        const product = await tx.product.findUnique({
+          where: {
+            id: productId,
+            active: true,
+          },
+        });
 
-      const existingItem = await prisma.cartItem.findUnique({
-        where: {
-          cartId_productId: {
+        if (!product) {
+          throw new Error("PRODUCT_NOT_FOUND");
+        }
+
+        const cart = await tx.cart.upsert({
+          where: {
+            userId,
+          },
+          create: {
+            userId,
+          },
+          update: {},
+        });
+
+        const existingItem = await tx.cartItem.findUnique({
+          where: {
+            cartId_productId: {
+              cartId: cart.id,
+              productId,
+            },
+          },
+        });
+
+        const newQuantity = existingItem
+          ? existingItem.quantity + quantity
+          : quantity;
+
+        if (newQuantity > 99) {
+          throw new Error("MAX_QUANTITY_EXCEEDED");
+        }
+
+        if (newQuantity > product.stock) {
+          throw new Error(`INSUFFICIENT_STOCK:${product.stock}`);
+        }
+
+        await tx.cartItem.upsert({
+          where: {
+            cartId_productId: {
+              cartId: cart.id,
+              productId,
+            },
+          },
+          create: {
             cartId: cart.id,
             productId,
+            quantity,
           },
-        },
-      });
-
-      const newQuantity = existingItem
-        ? existingItem.quantity + quantity
-        : quantity;
-
-      if (newQuantity > product.stock) {
-        return res.status(400).json({
-          message: `Only ${product.stock} item(s) available`,
+          update: {
+            quantity: newQuantity,
+          },
         });
-      }
-
-      await prisma.cartItem.upsert({
-        where: {
-          cartId_productId: {
-            cartId: cart.id,
-            productId,
-          },
-        },
-        create: {
-          cartId: cart.id,
-          productId,
-          quantity,
-        },
-        update: {
-          quantity: newQuantity,
-        },
       });
 
       return res.status(201).json({
         message: "Product added to cart",
       });
     } catch (error) {
+      if (error instanceof Error) {
+        if (error.message === "PRODUCT_NOT_FOUND") {
+          return res.status(404).json({
+            message: "Product not found or is no longer available",
+          });
+        }
+        if (error.message === "MAX_QUANTITY_EXCEEDED") {
+          return res.status(400).json({
+            message: "Quantity cannot exceed 99",
+          });
+        }
+        if (error.message.startsWith("INSUFFICIENT_STOCK:")) {
+          const stock = error.message.split(":")[1];
+          return res.status(400).json({
+            message: `Only ${stock} item(s) available`,
+          });
+        }
+      }
+
       console.error("Add to cart error:", error);
 
       return res.status(500).json({
@@ -184,6 +205,12 @@ router.patch(
       if (!Number.isInteger(quantity) || quantity < 1) {
         return res.status(400).json({
           message: "Quantity must be at least 1",
+        });
+      }
+
+      if (quantity > 99) {
+        return res.status(400).json({
+          message: "Quantity cannot exceed 99",
         });
       }
 

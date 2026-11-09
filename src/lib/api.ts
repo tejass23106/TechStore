@@ -262,6 +262,7 @@ export type ApiOrder = {
   subtotal: number;
   deliveryFee: number;
   total: number;
+  refundedAmount?: number;
   razorpayOrderId: string | null;
   razorpayPaymentId: string | null;
   createdAt: string;
@@ -774,6 +775,7 @@ export type AdminOrder = {
   subtotal: number;
   deliveryFee: number;
   total: number;
+  refundedAmount?: number;
 
   razorpayOrderId: string | null;
   razorpayPaymentId: string | null;

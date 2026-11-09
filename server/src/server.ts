@@ -17,6 +17,7 @@ import chatbotRouter from "./routes/chatbot.js";
 import subscriptionRouter from "./routes/subscription.js";
 import proFeaturesRouter from "./routes/proFeatures.js";
 import { apiRateLimiter } from "./Middleware/rateLimit.js";
+import { releaseExpiredStockReservations } from "./lib/stockReservations.js";
 
 dotenv.config();
 
@@ -53,6 +54,14 @@ app.use((req, res, next) => {
   );
 
   if (!stateChangingMethod) {
+    return next();
+  }
+
+  // Allow scheduled reservation expiry endpoint when authenticated by secret header
+  if (
+    req.path === "/api/orders/release-expired" &&
+    (req.header("x-cron-secret") || req.header("authorization"))
+  ) {
     return next();
   }
 
@@ -137,4 +146,11 @@ app.listen(PORT, () => {
   console.log(
     `TechStore server running on http://localhost:${PORT}`
   );
+
+  const EXPIRY_CHECK_INTERVAL_MS = 60 * 1000;
+  setInterval(() => {
+    releaseExpiredStockReservations().catch((err) => {
+      console.error("Background reservation expiry check error:", err);
+    });
+  }, EXPIRY_CHECK_INTERVAL_MS);
 });

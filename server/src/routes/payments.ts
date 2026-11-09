@@ -9,31 +9,32 @@ import prisma from "../lib/prisma.js";
 import { validate } from "../Middleware/validate.js";
 
 import {
-createPaymentSchema,
-verifyPaymentSchema,
+  createPaymentSchema,
+  verifyPaymentSchema,
 } from "../Middleware/validation.js";
 
 import {
-requireAuth,
-type AuthenticatedRequest,
+  requireAuth,
+  type AuthenticatedRequest,
 } from "../Middleware/auth.js";
 
 import { sendPaymentConfirmationEmail } from "../lib/email.js";
+import { processLateCaptureRefund } from "../lib/refunds.js";
 
 const router = Router();
 
 function getRazorpayClient() {
-const keyId = process.env.RAZORPAY_KEY_ID;
-const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
 
-if (!keyId || !keySecret) {
-return null;
-}
+  if (!keyId || !keySecret) {
+    return null;
+  }
 
-return new Razorpay({
-key_id: keyId,
-key_secret: keySecret,
-});
+  return new Razorpay({
+    key_id: keyId,
+    key_secret: keySecret,
+  });
 }
 
 /**
@@ -43,174 +44,184 @@ key_secret: keySecret,
 * Creates a Razorpay order for an existing pending
 * TechStore order.
   */
-  router.post(
+router.post(
   "/create",
   requireAuth,
   validate(createPaymentSchema),
   async (req: AuthenticatedRequest, res) => {
-  try {
-  const userId = req.userId!;
-  const razorpay = getRazorpayClient();
+    try {
+      const userId = req.userId!;
+      const razorpay = getRazorpayClient();
 
-  if (!razorpay) {
-  return res.status(500).json({
-  message: "Razorpay is not configured",
-  });
+      if (!razorpay) {
+        return res.status(500).json({
+          message: "Razorpay is not configured",
+        });
+      }
+
+      const { orderId } = req.body;
+      const parsedOrderId = Number(orderId);
+
+      if (
+        !Number.isInteger(parsedOrderId) ||
+        parsedOrderId <= 0
+      ) {
+        return res.status(400).json({
+          message: "Invalid order ID",
+        });
+      }
+
+      const order = await prisma.order.findFirst({
+        where: {
+          id: parsedOrderId,
+          userId,
+        },
+      });
+
+      if (!order) {
+        return res.status(404).json({
+          message: "Order not found",
+        });
+      }
+
+      if (order.status !== "PENDING") {
+        return res.status(400).json({
+          message: "This order is no longer pending",
+        });
+      }
+
+      if (order.paymentStatus !== "PENDING") {
+        return res.status(400).json({
+          message: "Payment has already been processed for this order",
+        });
+      }
+
+      if (
+        !order.stockReserved ||
+        (order.reservationExpiresAt && order.reservationExpiresAt <= new Date())
+      ) {
+        return res.status(400).json({
+          message:
+            "Stock reservation for this order has expired. Please place a new order.",
+        });
+      }
+
+      /**
+      * Reuse an existing Razorpay order.
+      */
+      if (order.razorpayOrderId) {
+        return res.json({
+          message: "Razorpay order already exists",
+          orderId: order.id,
+          razorpayOrderId: order.razorpayOrderId,
+          amount: order.total * 100,
+          currency: "INR",
+          keyId: process.env.RAZORPAY_KEY_ID,
+        });
+      }
+
+      /**
+      * TechStore stores prices in rupees.
+      * Razorpay expects paise.
+      */
+      const amountInPaise = order.total * 100;
+
+      if (
+        !Number.isInteger(amountInPaise) ||
+        amountInPaise <= 0
+      ) {
+        return res.status(400).json({
+          message: "Invalid order amount",
+        });
+      }
+
+      const razorpayOrder = await razorpay.orders.create({
+        amount: amountInPaise,
+        currency: "INR",
+        receipt: `techstore_order_${order.id}`,
+        notes: {
+          techstoreOrderId: String(order.id),
+          userId: String(userId),
+        },
+      });
+
+      /**
+      * Only attach the Razorpay order if another request
+      * has not already attached one.
+      */
+      const updateResult = await prisma.order.updateMany({
+        where: {
+          id: order.id,
+          userId,
+          paymentStatus: "PENDING",
+          status: "PENDING",
+          razorpayOrderId: null,
+        },
+        data: {
+          razorpayOrderId: razorpayOrder.id,
+        },
+      });
+
+      /**
+      * If another concurrent request won the race,
+      * return the Razorpay order already stored in the DB.
+      */
+      if (updateResult.count !== 1) {
+        const currentOrder = await prisma.order.findFirst({
+          where: {
+            id: order.id,
+            userId,
+          },
+          select: {
+            id: true,
+            total: true,
+            razorpayOrderId: true,
+            paymentStatus: true,
+            status: true,
+          },
+        });
+
+
+        if (
+          currentOrder?.razorpayOrderId &&
+          currentOrder.paymentStatus === "PENDING" &&
+          currentOrder.status === "PENDING"
+        ) {
+          return res.json({
+            message: "Razorpay order already exists",
+            orderId: currentOrder.id,
+            razorpayOrderId:
+              currentOrder.razorpayOrderId,
+            amount: currentOrder.total * 100,
+            currency: "INR",
+            keyId: process.env.RAZORPAY_KEY_ID,
+          });
+        }
+
+        return res.status(400).json({
+          message: "This order is no longer available for payment",
+        });
+
+
+      }
+
+      return res.status(201).json({
+        message: "Razorpay order created successfully",
+        orderId: order.id,
+        razorpayOrderId: razorpayOrder.id,
+        amount: amountInPaise,
+        currency: "INR",
+        keyId: process.env.RAZORPAY_KEY_ID,
+      });
+    } catch (error) {
+      console.error("Create Razorpay order error:", error);
+
+      return res.status(500).json({
+        message: "Failed to create Razorpay order",
+      });
+    }
   }
-
-  const { orderId } = req.body;
-  const parsedOrderId = Number(orderId);
-
-  if (
-  !Number.isInteger(parsedOrderId) ||
-  parsedOrderId <= 0
-  ) {
-  return res.status(400).json({
-  message: "Invalid order ID",
-  });
-  }
-
-  const order = await prisma.order.findFirst({
-  where: {
-  id: parsedOrderId,
-  userId,
-  },
-  });
-
-  if (!order) {
-  return res.status(404).json({
-  message: "Order not found",
-  });
-  }
-
-  if (order.status !== "PENDING") {
-  return res.status(400).json({
-  message: "This order is no longer pending",
-  });
-  }
-
-  if (order.paymentStatus !== "PENDING") {
-  return res.status(400).json({
-  message: "Payment has already been processed for this order",
-  });
-  }
-
-  /**
-  * Reuse an existing Razorpay order.
-  */
-  if (order.razorpayOrderId) {
-  return res.json({
-  message: "Razorpay order already exists",
-  orderId: order.id,
-  razorpayOrderId: order.razorpayOrderId,
-  amount: order.total * 100,
-  currency: "INR",
-  keyId: process.env.RAZORPAY_KEY_ID,
-  });
-  }
-
-  /**
-  * TechStore stores prices in rupees.
-  * Razorpay expects paise.
-  */
-  const amountInPaise = order.total * 100;
-
-  if (
-  !Number.isInteger(amountInPaise) ||
-  amountInPaise <= 0
-  ) {
-  return res.status(400).json({
-  message: "Invalid order amount",
-  });
-  }
-
-  const razorpayOrder = await razorpay.orders.create({
-  amount: amountInPaise,
-  currency: "INR",
-  receipt: `techstore_order_${order.id}`,
-  notes: {
-  techstoreOrderId: String(order.id),
-  userId: String(userId),
-  },
-  });
-
-  /**
-  * Only attach the Razorpay order if another request
-  * has not already attached one.
-  */
-  const updateResult = await prisma.order.updateMany({
-  where: {
-  id: order.id,
-  userId,
-  paymentStatus: "PENDING",
-  status: "PENDING",
-  razorpayOrderId: null,
-  },
-  data: {
-  razorpayOrderId: razorpayOrder.id,
-  },
-  });
-
-  /**
-  * If another concurrent request won the race,
-  * return the Razorpay order already stored in the DB.
-  */
-  if (updateResult.count !== 1) {
-  const currentOrder = await prisma.order.findFirst({
-  where: {
-  id: order.id,
-  userId,
-  },
-  select: {
-  id: true,
-  total: true,
-  razorpayOrderId: true,
-  paymentStatus: true,
-  status: true,
-  },
-  });
-
-  
-   if (
-     currentOrder?.razorpayOrderId &&
-     currentOrder.paymentStatus === "PENDING" &&
-     currentOrder.status === "PENDING"
-   ) {
-     return res.json({
-       message: "Razorpay order already exists",
-       orderId: currentOrder.id,
-       razorpayOrderId:
-         currentOrder.razorpayOrderId,
-       amount: currentOrder.total * 100,
-       currency: "INR",
-       keyId: process.env.RAZORPAY_KEY_ID,
-     });
-   }
-
-   return res.status(400).json({
-     message: "This order is no longer available for payment",
-   });
-  
-
-  }
-
-  return res.status(201).json({
-  message: "Razorpay order created successfully",
-  orderId: order.id,
-  razorpayOrderId: razorpayOrder.id,
-  amount: amountInPaise,
-  currency: "INR",
-  keyId: process.env.RAZORPAY_KEY_ID,
-  });
-  } catch (error) {
-  console.error("Create Razorpay order error:", error);
-
-  return res.status(500).json({
-  message: "Failed to create Razorpay order",
-  });
-  }
-  }
-  );
+);
 
 /**
 
@@ -219,349 +230,413 @@ key_secret: keySecret,
 * Verifies the Razorpay payment signature and confirms
 * the corresponding TechStore order.
   */
-  router.post(
+router.post(
   "/verify",
   requireAuth,
   validate(verifyPaymentSchema),
   async (req: AuthenticatedRequest, res) => {
-  try {
-  const userId = req.userId!;
+    const {
+      orderId,
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+    } = req.body;
 
-  const {
-  orderId,
-  razorpayOrderId,
-  razorpayPaymentId,
-  razorpaySignature,
-  } = req.body;
+    const parsedOrderId = Number(orderId);
+    let expectedAmount = 0;
 
-  const parsedOrderId = Number(orderId);
+    try {
+      const userId = req.userId!;
 
-  if (
-  !Number.isInteger(parsedOrderId) ||
-  parsedOrderId <= 0 ||
-  !razorpayOrderId ||
-  !razorpayPaymentId ||
-  !razorpaySignature
-  ) {
-  return res.status(400).json({
-  message: "Invalid payment verification data",
-  });
-  }
+      if (
+        !Number.isInteger(parsedOrderId) ||
+        parsedOrderId <= 0 ||
+        !razorpayOrderId ||
+        !razorpayPaymentId ||
+        !razorpaySignature
+      ) {
+        return res.status(400).json({
+          message: "Invalid payment verification data",
+        });
+      }
 
-  const order = await prisma.order.findFirst({
-  where: {
-  id: parsedOrderId,
-  userId,
-  },
-  });
+      const order = await prisma.order.findFirst({
+        where: {
+          id: parsedOrderId,
+          userId,
+        },
+      });
 
-  if (!order) {
-  return res.status(404).json({
-  message: "Order not found",
-  });
-  }
+      if (!order) {
+        return res.status(404).json({
+          message: "Order not found",
+        });
+      }
 
-  /**
-  * Idempotency.
-  */
-  if (order.paymentStatus === "PAID") {
-  return res.json({
-  message: "Payment already verified",
-  orderId: order.id,
-  paymentStatus: order.paymentStatus,
-  status: order.status,
-  });
-  }
+      /**
+       * Make sure the Razorpay order belongs to this TechStore order.
+       */
+      if (order.razorpayOrderId !== razorpayOrderId) {
+        return res.status(400).json({
+          message: "Razorpay order ID does not match",
+        });
+      }
 
-  if (order.status !== "PENDING") {
-  return res.status(400).json({
-  message: "This order is no longer pending",
-  });
-  }
+      const razorpayKeySecret =
+        process.env.RAZORPAY_KEY_SECRET;
 
-  if (order.paymentStatus !== "PENDING") {
-  return res.status(400).json({
-  message: "Payment has already been processed",
-  });
-  }
+      if (!razorpayKeySecret) {
+        return res.status(500).json({
+          message: "Razorpay is not configured",
+        });
+      }
 
-  /**
-  * Make sure the Razorpay order belongs to this
-  * TechStore order.
-  */
-  if (order.razorpayOrderId !== razorpayOrderId) {
-  return res.status(400).json({
-  message: "Razorpay order ID does not match",
-  });
-  }
+      /**
+       * Verify Razorpay signature.
+       */
+      const generatedSignature = crypto
+        .createHmac("sha256", razorpayKeySecret)
+        .update(
+          `${razorpayOrderId}|${razorpayPaymentId}`
+        )
+        .digest("hex");
 
-  const razorpayKeySecret =
-  process.env.RAZORPAY_KEY_SECRET;
+      if (
+        generatedSignature.length !==
+        razorpaySignature.length ||
+        !crypto.timingSafeEqual(
+          Buffer.from(generatedSignature, "utf8"),
+          Buffer.from(razorpaySignature, "utf8")
+        )
+      ) {
+        return res.status(400).json({
+          message: "Invalid Razorpay signature",
+        });
+      }
 
-  if (!razorpayKeySecret) {
-  return res.status(500).json({
-  message: "Razorpay is not configured",
-  });
-  }
+      /**
+       * Idempotency check for already-paid orders.
+       * An already-paid response must not blindly accept an unrelated payment ID.
+       */
+      if (order.paymentStatus === "PAID") {
+        if (
+          order.razorpayPaymentId &&
+          order.razorpayPaymentId !== razorpayPaymentId
+        ) {
+          return res.status(400).json({
+            message:
+              "Payment ID does not match the payment confirmed for this order",
+          });
+        }
 
-  /**
-  * Verify Razorpay signature.
-  */
-  const generatedSignature = crypto
-  .createHmac("sha256", razorpayKeySecret)
-  .update(
-  `${razorpayOrderId}|${razorpayPaymentId}`
-  )
-  .digest("hex");
+        return res.json({
+          message: "Payment already verified",
+          orderId: order.id,
+          paymentStatus: order.paymentStatus,
+          status: order.status,
+        });
+      }
 
-  if (
-  generatedSignature.length !==
-  razorpaySignature.length ||
-  !crypto.timingSafeEqual(
-  Buffer.from(generatedSignature, "utf8"),
-  Buffer.from(razorpaySignature, "utf8")
-  )
-  ) {
-  return res.status(400).json({
-  message: "Invalid Razorpay signature",
-  });
-  }
+      if (order.status !== "PENDING") {
+        return res.status(400).json({
+          message: "This order is no longer pending",
+        });
+      }
 
-  const razorpay = getRazorpayClient();
+      if (order.paymentStatus !== "PENDING") {
+        return res.status(400).json({
+          message: "Payment has already been processed",
+        });
+      }
 
-  if (!razorpay) {
-  return res.status(500).json({
-  message: "Razorpay is not configured",
-  });
-  }
+      const razorpay = getRazorpayClient();
 
-  /**
-  * Verify Razorpay order details directly.
-  */
-  const razorpayOrder =
-  await razorpay.orders.fetch(razorpayOrderId);
+      if (!razorpay) {
+        return res.status(500).json({
+          message: "Razorpay is not configured",
+        });
+      }
 
-  const expectedAmount = order.total * 100;
+      /**
+      * Verify Razorpay order details directly.
+      */
+      const razorpayOrder =
+        await razorpay.orders.fetch(razorpayOrderId);
 
-  if (
-  razorpayOrder.amount !== expectedAmount ||
-  razorpayOrder.currency !== "INR"
-  ) {
-  return res.status(400).json({
-  message:
-  "Razorpay order amount or currency mismatch",
-  });
-  }
+      expectedAmount = order.total * 100;
 
-  /**
-  * Verify the payment belongs to the Razorpay order
-  * and has actually been captured.
-  */
-  const razorpayPayment =
-  await razorpay.payments.fetch(
-  razorpayPaymentId
-  );
+      if (
+        razorpayOrder.amount !== expectedAmount ||
+        razorpayOrder.currency !== "INR"
+      ) {
+        return res.status(400).json({
+          message:
+            "Razorpay order amount or currency mismatch",
+        });
+      }
 
-  if (
-  razorpayPayment.order_id !==
-  razorpayOrderId
-  ) {
-  return res.status(400).json({
-  message:
-  "Razorpay payment does not belong to this order",
-  });
-  }
+      /**
+      * Verify the payment belongs to the Razorpay order
+      * and has actually been captured.
+      */
+      const razorpayPayment =
+        await razorpay.payments.fetch(
+          razorpayPaymentId
+        );
 
-  /**
-  * Explicitly verify the actual payment amount.
-  */
-  if (
-  razorpayPayment.amount !== expectedAmount ||
-  razorpayPayment.currency !== "INR"
-  ) {
-  return res.status(400).json({
-  message:
-  "Razorpay payment amount or currency mismatch",
-  });
-  }
+      if (
+        razorpayPayment.order_id !==
+        razorpayOrderId
+      ) {
+        return res.status(400).json({
+          message:
+            "Razorpay payment does not belong to this order",
+        });
+      }
 
-  if (razorpayPayment.status !== "captured") {
-  return res.status(400).json({
-  message:
-  `Payment is not captured. Current status: ${razorpayPayment.status}`,
-  });
-  }
+      /**
+      * Explicitly verify the actual payment amount.
+      */
+      if (
+        razorpayPayment.amount !== expectedAmount ||
+        razorpayPayment.currency !== "INR"
+      ) {
+        return res.status(400).json({
+          message:
+            "Razorpay payment amount or currency mismatch",
+        });
+      }
 
-  /**
-  * Confirm payment, reduce stock and clear cart
-  * atomically.
-  */
-  const result = await prisma.$transaction(
-  async (tx) => {
-  const currentOrder =
-  await tx.order.findFirst({
-  where: {
-  id: parsedOrderId,
-  userId,
-  },
-  include: {
-  items: true,
-  },
-  });
+      if (razorpayPayment.status !== "captured") {
+        return res.status(400).json({
+          message:
+            `Payment is not captured. Current status: ${razorpayPayment.status}`,
+        });
+      }
 
-  
-     if (!currentOrder) {
-       throw new Error("Order not found");
-     }
+      /**
+     * Confirm payment using the existing stock reservation.
+     * Never deduct stock a second time.
+     */
+      const result = await prisma.$transaction(async (tx) => {
+        const currentOrder = await tx.order.findFirst({
+          where: {
+            id: parsedOrderId,
+            userId,
+          },
+        });
 
-     /**
-      * Another process, such as the Razorpay webhook,
-      * may have completed this payment first.
+        if (!currentOrder) {
+          throw new Error("ORDER_NOT_FOUND");
+        }
+
+        // Another process may have confirmed payment first.
+        if (currentOrder.paymentStatus === "PAID") {
+          if (
+            currentOrder.razorpayPaymentId &&
+            currentOrder.razorpayPaymentId !== razorpayPaymentId
+          ) {
+            throw new Error("PAYMENT_ID_MISMATCH");
+          }
+          return {
+            order: currentOrder,
+            paymentConfirmedByThisRequest: false,
+          };
+        }
+
+        if (
+          currentOrder.status !== "PENDING" ||
+          currentOrder.paymentStatus !== "PENDING"
+        ) {
+          throw new Error("ORDER_NOT_PENDING");
+        }
+
+
+        // Atomically claim the reservation and confirm payment.
+        // Only one concurrent request can successfully update it.
+        const claimed = await tx.order.updateMany({
+          where: {
+            id: parsedOrderId,
+            userId,
+            status: "PENDING",
+            paymentStatus: "PENDING",
+            stockReserved: true,
+            reservationExpiresAt: {
+              gt: new Date(),
+            },
+          },
+          data: {
+            paymentStatus: "PAID",
+            status: "CONFIRMED",
+            stockReserved: false,
+            razorpayPaymentId,
+            razorpaySignature,
+          },
+        });
+
+        if (claimed.count !== 1) {
+          // Check whether another process completed payment.
+          const latestOrder = await tx.order.findUnique({
+            where: {
+              id: parsedOrderId,
+            },
+          });
+
+          if (latestOrder?.paymentStatus === "PAID") {
+            if (
+              latestOrder.razorpayPaymentId &&
+              latestOrder.razorpayPaymentId !== razorpayPaymentId
+            ) {
+              throw new Error("PAYMENT_ID_MISMATCH");
+            }
+            return {
+              order: latestOrder,
+              paymentConfirmedByThisRequest: false,
+            };
+          }
+
+          throw new Error("RESERVATION_EXPIRED_OR_UNAVAILABLE");
+        }
+
+        // Clear the authenticated user's cart.
+        await tx.cartItem.deleteMany({
+          where: {
+            cart: {
+              userId,
+            },
+          },
+        });
+
+        const updatedOrder = await tx.order.findUniqueOrThrow({
+          where: {
+            id: parsedOrderId,
+          },
+        });
+
+        return {
+          order: updatedOrder,
+          paymentConfirmedByThisRequest: true,
+        };
+      });
+
+
+
+
+      /**
+      * Only send the payment confirmation email if
+      * THIS request actually completed the payment.
       *
-      * In that case, do not send another confirmation
-      * email from this request.
+      * This prevents duplicate emails when the webhook
+      * wins the race.
       */
-     if (currentOrder.paymentStatus === "PAID") {
-       return {
-         order: currentOrder,
-         paymentConfirmedByThisRequest: false,
-       };
-     }
+      if (result.paymentConfirmedByThisRequest) {
+        try {
+          const user = await prisma.user.findUnique({
+            where: {
+              id: userId,
+            },
+            select: {
+              email: true,
+            },
+          });
 
-     if (
-       currentOrder.status !== "PENDING" ||
-       currentOrder.paymentStatus !== "PENDING"
-     ) {
-       throw new Error("ORDER_NOT_PENDING");
-     }
 
-     /**
-      * Reduce stock only if sufficient stock exists.
-      */
-     for (const item of currentOrder.items) {
-       const updatedProduct =
-         await tx.product.updateMany({
-           where: {
-             id: item.productId,
-             stock: {
-               gte: item.quantity,
-             },
-           },
-           data: {
-             stock: {
-               decrement: item.quantity,
-             },
-           },
-         });
+          if (user?.email) {
+            await sendPaymentConfirmationEmail({
+              email: user.email,
+              orderId: result.order.id,
+              paymentId: razorpayPaymentId,
+              amount: result.order.total,
+            });
+          }
+        } catch (emailError) {
+          console.error(
+            "Payment confirmation email failed:",
+            emailError
+          );
+        }
 
-       if (updatedProduct.count !== 1) {
-         throw new Error(
-           `Insufficient stock for product ${item.productId}`
-         );
-       }
-     }
 
-     /**
-      * Mark order as paid and confirmed.
-      */
-     const updatedOrder =
-       await tx.order.update({
-         where: {
-           id: currentOrder.id,
-         },
-         data: {
-           paymentStatus: "PAID",
-           status: "CONFIRMED",
-           razorpayPaymentId,
-           razorpaySignature,
-         },
-       });
+      }
 
-     /**
-      * Clear the authenticated user's cart.
-      */
-     await tx.cartItem.deleteMany({
-       where: {
-         cart: {
-           userId,
-         },
-       },
-     });
+      return res.json({
+        message: "Payment verified successfully",
+        orderId: result.order.id,
+        paymentStatus:
+          result.order.paymentStatus,
+        status: result.order.status,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "PAYMENT_ID_MISMATCH"
+      ) {
+        return res.status(400).json({
+          message:
+            "Payment ID does not match the payment confirmed for this order",
+        });
+      }
 
-     return {
-       order: updatedOrder,
-       paymentConfirmedByThisRequest: true,
-     };
-   }
-  
+      if (
+        error instanceof Error &&
+        error.message === "ORDER_NOT_PENDING"
+      ) {
+        return res.status(400).json({
+          message: "This order is no longer pending",
+        });
+      }
 
-  );
+      // Handle expired or unavailable stock reservation.
+      // Payment has been captured, but reservation expired: automatically initiate refund!
+      if (
+        error instanceof Error &&
+        error.message === "RESERVATION_EXPIRED_OR_UNAVAILABLE"
+      ) {
+        let refundResult: {
+          success: boolean;
+          status: "PENDING" | "SUBMITTED" | "PROCESSED" | "FAILED";
+          message: string;
+        } = { success: false, status: "FAILED", message: "" };
 
-  /**
-  * Only send the payment confirmation email if
-  * THIS request actually completed the payment.
-  *
-  * This prevents duplicate emails when the webhook
-  * wins the race.
-  */
-  if (result.paymentConfirmedByThisRequest) {
-  try {
-  const user = await prisma.user.findUnique({
-  where: {
-  id: userId,
-  },
-  select: {
-  email: true,
-  },
-  });
+        try {
+          refundResult = await processLateCaptureRefund({
+            orderId: parsedOrderId,
+            paymentId: razorpayPaymentId,
+            amountPaise: expectedAmount,
+          });
+        } catch (refundError) {
+          console.error("Failed to initiate late capture refund:", refundError);
+        }
 
-  
-     if (user?.email) {
-       await sendPaymentConfirmationEmail({
-         email: user.email,
-         orderId: result.order.id,
-         paymentId: razorpayPaymentId,
-         amount: result.order.total,
-       });
-     }
-   } catch (emailError) {
-     console.error(
-       "Payment confirmation email failed:",
-       emailError
-     );
-   }
-  
+        if (refundResult.success || refundResult.status === "SUBMITTED" || refundResult.status === "PROCESSED") {
+          return res.status(409).json({
+            message:
+              "Your stock reservation has expired. Your payment has been received and an automatic refund has been initiated.",
+            orderId: parsedOrderId,
+            refundInitiated: true,
+            refundStatus: refundResult.status,
+          });
+        }
 
+        return res.status(409).json({
+          message:
+            "Your stock reservation has expired. Your payment was captured, but the automatic refund could not be initiated immediately. Our team is processing it.",
+          orderId: parsedOrderId,
+          refundInitiated: false,
+          refundStatus: refundResult.status,
+        });
+      }
+
+      console.error(
+        "Verify Razorpay payment error:",
+        error
+      );
+
+      return res.status(500).json({
+        message: "Payment verification failed",
+      });
+    }
   }
-
-  return res.json({
-  message: "Payment verified successfully",
-  orderId: result.order.id,
-  paymentStatus:
-  result.order.paymentStatus,
-  status: result.order.status,
-  });
-  } catch (error) {
-  if (
-  error instanceof Error &&
-  error.message === "ORDER_NOT_PENDING"
-  ) {
-  return res.status(400).json({
-  message:
-  "This order is no longer pending",
-  });
-  }
-
-  console.error(
-  "Verify Razorpay payment error:",
-  error
-  );
-
-  return res.status(500).json({
-  message: "Payment verification failed",
-  });
-  }
-  }
-  );
+);
 
 export default router;
