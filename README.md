@@ -1,8 +1,61 @@
-# TechStore
+#  TechStore
 
-A modern full-stack e-commerce platform built with React, TypeScript, Express, Prisma, PostgreSQL, Razorpay, Gemini AI, and Resend.
+### A Modern Full-Stack E-Commerce Platform
 
-TechStore is designed as a complete production-style e-commerce application rather than a static shopping website. It includes customer authentication, product browsing, cart management, wishlist, checkout, orders, Razorpay payments, reviews, administration, AI-assisted shopping, email services, database persistence, security controls, and cloud deployment.
+A production-style e-commerce web application built with **React, TypeScript, Express, Prisma, and PostgreSQL**, featuring secure authentication, online payments, AI-powered shopping assistance, and a complete shopping experience.
+
+<p align="center">
+  <a href="https://tech-store-seven-brown.vercel.app/">
+    <img src="https://img.shields.io/badge/_Live_Demo-Visit_TechStore-16a34a?style=for-the-badge" alt="Live Demo" />
+  </a>
+  <a href="https://github.com/tejass23106/TechStore">
+    <img src="https://img.shields.io/badge/GitHub-Repository-181717?style=for-the-badge&logo=github" alt="GitHub Repository" />
+  </a>
+</p>
+
+---
+
+### ✨ About the Project
+
+TechStore is a full-stack technology e-commerce platform designed to deliver a complete online shopping experience. It combines a responsive React frontend with a secure Express backend, persistent PostgreSQL storage, Razorpay payment integration, and a Gemini-powered AI shopping assistant.
+
+The platform supports customer accounts, product discovery, shopping carts, wishlists, checkout, order management, product reviews, and a dedicated admin dashboard.
+
+###  Key Features
+
+-  **Product Catalog** – Browse products, categories, pricing, and availability.
+-  **Authentication** – Secure session-based authentication, email verification, and password reset.
+-  **Shopping Cart & Wishlist** – Persistent cart and wishlist management.
+-  **Online Payments** – Razorpay checkout with server-side payment verification.
+-  **Order Management** – Order creation, history, details, and status management.
+-  **Product Reviews** – Verified-purchase reviews and review management.
+-  **AI Shopping Assistant** – Gemini-powered product recommendations and natural-language shopping interactions.
+-  **Admin Dashboard** – Manage products, stock, orders, and reviews.
+-  **Security** – Password hashing, HTTP-only cookies, validation, rate limiting, and authorization.
+-  **Responsive Design** – Optimized shopping experience across desktop and mobile devices.
+
+###  Tech Stack
+
+| Category | Technologies |
+|---|---|
+| Frontend | React, TypeScript, Vite, Tailwind CSS |
+| Backend | Node.js, Express, TypeScript |
+| Database | PostgreSQL, Neon |
+| ORM | Prisma |
+| Payments | Razorpay |
+| AI | Google Gemini API |
+| Email | Resend |
+| Security | bcrypt, Zod, Helmet, CORS |
+| Deployment | Vercel, Render |
+
+###  Live Deployment
+
+| Service | URL |
+|---|---|
+| **Live Website** | https://tech-store-seven-brown.vercel.app/ |
+| Backend API | https://techstore-backend-ds0f.onrender.com |
+| GitHub Repository | https://github.com/tejass23106/TechStore |
+
 
 ---
 
@@ -81,6 +134,7 @@ TechStore is designed as a complete production-style e-commerce application rath
 TechStore is a full-stack e-commerce web application for selling technology products.
 
 The application provides two primary experiences:
+* [Live Demo](#-live-demo)
 
 ### Customer
 
